@@ -1,0 +1,45 @@
+name: 发布 BioAssay Studio 网站
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      - name: 准备静态网站
+        shell: bash
+        run: |
+          mkdir -p _site/vendor
+          cp .nojekyll index.html styles.css analysis-core.js app.js README.md privacy.html manifest.webmanifest icon.svg service-worker.js robots.txt THIRD_PARTY_NOTICES.txt release-manifest.json _site/
+          cp vendor/chart.umd.js vendor/xlsx.full.min.js vendor/UTIF.js vendor/CHARTJS-LICENSE.txt vendor/SHEETJS-LICENSE.txt vendor/UTIF-LICENSE.txt _site/vendor/
+
+      - name: 配置 GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: 上传网站文件
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+      - name: 发布网站
+        id: deployment
+        uses: actions/deploy-pages@v4

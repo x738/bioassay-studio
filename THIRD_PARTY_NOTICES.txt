@@ -1,0 +1,26 @@
+BioAssay Studio - Third-Party Notices
+Version 2.4.0
+
+This distribution includes the following locally vendored open-source libraries:
+
+1. Chart.js 4.5.1
+   Copyright (c) 2014-2025 Chart.js Contributors
+   License: MIT
+   Source: https://github.com/chartjs/Chart.js
+   The full license text is distributed at vendor/CHARTJS-LICENSE.txt.
+
+2. SheetJS Community Edition 0.20.3
+   Copyright (C) 2012-present SheetJS LLC
+   License: Apache License 2.0
+   Source: https://git.sheetjs.com/sheetjs/sheetjs
+   License: https://docs.sheetjs.com/docs/miscellany/license/
+   The full license text is distributed at vendor/SHEETJS-LICENSE.txt.
+
+3. UTIF.js
+   Copyright (c) 2017 Photopea
+   License: MIT
+   Source: https://github.com/photopea/UTIF.js
+   The full license text is distributed at vendor/UTIF-LICENSE.txt.
+
+The library files are hosted with this application. The application does not
+load these libraries from a third-party CDN while it is running.

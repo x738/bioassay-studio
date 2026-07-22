@@ -1,0 +1,14 @@
+{
+  "name": "BioAssay Studio - qPCR 与 WB 定量",
+  "short_name": "BioAssay Studio",
+  "description": "在浏览器本地完成 qPCR ΔΔCt 与 Western blot 灰度分析。",
+  "lang": "zh-CN",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f4f7fb",
+  "theme_color": "#142342",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}

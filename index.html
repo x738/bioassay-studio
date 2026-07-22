@@ -1,0 +1,327 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="在浏览器本地完成 qPCR ΔΔCt 计算与 Western blot 灰度定量。" />
+    <meta name="theme-color" content="#142342" />
+    <meta name="referrer" content="no-referrer" />
+    <link rel="icon" href="icon.svg" type="image/svg+xml" />
+    <link rel="manifest" href="manifest.webmanifest" />
+    <title>BioAssay Studio | qPCR 与 WB 定量</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="app-header">
+      <div class="brand-lockup">
+        <span class="brand-mark" aria-hidden="true">BS</span>
+        <div>
+          <p class="eyebrow">BIOASSAY STUDIO</p>
+          <h1>科研数据工作台</h1>
+        </div>
+      </div>
+      <div class="header-tools">
+        <div class="privacy-note">本地浏览器处理 · 不上传数据</div>
+        <button id="undoAction" class="header-action history-action" type="button" disabled title="撤销（Ctrl+Z）">撤销</button>
+        <button id="redoAction" class="header-action history-action" type="button" disabled title="重做（Ctrl+Y）">重做</button>
+        <button id="exportAudit" class="header-action" type="button">完整性报告</button>
+        <button id="saveProject" class="header-action" type="button">保存项目</button>
+        <label class="header-action file-button direct-file-picker"><span>恢复项目</span><input id="restoreProjectInput" type="file" accept="application/json,.json" aria-label="从电脑选择 BioAssay Studio 项目文件" /></label>
+      </div>
+    </header>
+
+    <nav class="module-tabs" aria-label="分析模块">
+      <button class="module-tab active" data-module="qpcr">qPCR ΔΔCt 分析</button>
+      <button class="module-tab" data-module="wb">WB 灰度分析</button>
+    </nav>
+
+    <main>
+      <section id="qpcrModule" class="module active-module" aria-labelledby="qpcrTitle">
+        <div class="module-intro">
+          <div>
+            <p class="kicker">RELATIVE QUANTIFICATION</p>
+            <h2 id="qpcrTitle">qPCR ΔΔCt 分析</h2>
+            <p>导入 Ct/Cq 数据，完成质控、内参与对照组设置，并生成相对表达结果。</p>
+          </div>
+          <button id="loadDemoQpcr" class="button button-secondary">载入示例数据</button>
+        </div>
+
+        <ol class="wizard" aria-label="qPCR 分析步骤">
+          <li class="wizard-step active" data-step="1"><span>1</span>导入数据</li>
+          <li class="wizard-step" data-step="2"><span>2</span>匹配列</li>
+          <li class="wizard-step" data-step="3"><span>3</span>质控与设置</li>
+          <li class="wizard-step" data-step="4"><span>4</span>结果</li>
+        </ol>
+
+        <div id="qpcrStepContent" class="surface qpcr-surface"></div>
+      </section>
+
+      <section id="wbModule" class="module" aria-labelledby="wbTitle">
+        <div class="wb-mode-tabs" role="tablist" aria-label="WB 分析模式">
+          <button class="wb-mode-tab active" type="button" data-wb-mode="single" role="tab" aria-selected="true">单图 ROI 定量</button>
+          <button class="wb-mode-tab" type="button" data-wb-mode="pair" role="tab" aria-selected="false">目的蛋白 / 内参双图</button>
+          <button class="wb-mode-tab" type="button" data-wb-mode="figure" role="tab" aria-selected="false">图注与排版</button>
+        </div>
+
+        <div id="wbSingleWorkspace">
+        <div class="wb-shell">
+          <div class="wb-header">
+            <div>
+              <p class="kicker">DENSITOMETRY</p>
+              <h2 id="wbTitle">Western blot 灰度分析</h2>
+              <p>框选背景与条带区域，自动计算积分灰度、背景扣除和归一化结果。</p>
+              <div id="wbSourceMeta" class="source-integrity">尚未载入原始图像</div>
+            </div>
+            <div class="wb-actions">
+              <label id="openWbImage" class="button button-primary file-button direct-file-picker"><span>打开 WB 图片</span><input id="wbImageInput" type="file" accept=".png,.jpg,.jpeg,.tif,.tiff,.bmp,image/png,image/jpeg,image/tiff,image/bmp" aria-label="从电脑选择 WB 图片" /></label>
+              <button id="exportWb" class="button button-ghost">导出 CSV</button>
+              <button id="clearWb" class="button button-ghost danger">清空</button>
+            </div>
+          </div>
+
+          <div class="wb-layout">
+            <aside class="wb-tools">
+              <h3>ROI 标注</h3>
+              <p class="muted">选择类型后，在图像上拖动鼠标框选区域。</p>
+              <label>标注类型
+                <select id="roiType">
+                  <option value="background">背景</option>
+                  <option value="band">条带</option>
+                </select>
+              </label>
+              <label>名称
+                <input id="roiName" type="text" value="背景" maxlength="40" />
+              </label>
+              <label>分组 / 泳道
+                <input id="roiGroup" type="text" placeholder="如：Control-1" maxlength="40" />
+              </label>
+              <label class="checkbox-row"><input id="invertIntensity" type="checkbox" checked />反转灰度（暗带为高信号）</label>
+              <div class="tool-divider"></div>
+              <div class="auto-detect-card">
+                <h4>自动建议</h4>
+                <p>基于图像信号峰值推荐条带与背景 ROI；生成后仍可手动删除、补画或调整。</p>
+                <label>识别灵敏度 <span class="range-value" id="autoSensitivityValue">65</span>
+                  <input id="autoSensitivity" type="range" min="35" max="90" value="65" />
+                </label>
+                <label>最大候选条带 <span class="field-hint">默认每泳道仅取主条带</span>
+                  <input id="autoMaxBands" type="number" min="1" max="96" value="24" />
+                </label>
+                <label>预期泳道/条带数 <span class="field-hint">不含 Marker；按实际样品泳道数填写</span>
+                  <input id="autoLaneCount" type="number" min="1" max="96" placeholder="留空自动" />
+                </label>
+                <div class="compact-control-grid">
+                  <label>每泳道最多条带<input id="autoBandsPerLane" type="number" min="1" max="8" value="1" /></label>
+                  <label>纵向最小峰距（px）<input id="autoBandGap" type="number" min="2" max="160" value="12" /></label>
+                </div>
+                <label class="checkbox-row"><input id="autoBackground" type="checkbox" checked />添加自动背景 ROI</label>
+                <label class="checkbox-row"><input id="wbAutoExcludeBad" type="checkbox" />自动排除严重 QC 条带</label>
+                <button id="autoDetectWb" class="button button-auto" type="button">自动识别条带与背景</button>
+                <button id="clearAutoRois" class="text-action" type="button">仅清除自动 ROI</button>
+                <p id="autoDetectionNote" class="auto-note">自动定位真实泳道中心后逐泳道找峰；预期泳道数仅用于补全弱带，不会等距切分图片。</p>
+              </div>
+              <div class="tool-divider"></div>
+              <label>背景扣除方法
+                <select id="backgroundMode"><option value="global">全部背景 ROI 平均</option><option value="nearest">最近背景 ROI</option><option value="side">条带左右局部背景</option><option value="plane">二维稳健背景平面</option></select>
+              </label>
+              <label>归一化参照条带
+                <select id="wbReference"><option value="">未选择</option></select>
+              </label>
+              <p class="helper">归一化值 = 背景扣除后的条带积分 / 参照条带积分。自动结果是候选项，应在导出前人工复核。</p>
+              <div id="wbQuickStats" class="quick-stats"></div>
+              <div class="roi-edit-tools">
+                <button id="duplicateSelectedRoi" type="button">复制选中 ROI</button>
+                <button id="equalizeBandRois" type="button">统一条带尺寸</button>
+                <button id="deleteSelectedRoi" type="button" class="danger">删除选中 ROI</button>
+              </div>
+            </aside>
+
+            <div class="canvas-column">
+              <div id="wbDropzone" class="canvas-frame" tabindex="0" aria-label="Western blot 图像画布">
+                <canvas id="wbCanvas"></canvas>
+                <div id="wbEmptyState" class="wb-empty-state">
+                  <strong>拖入 Western blot 图片</strong>
+                  <span>或点击“打开 WB 图片”选择 PNG、JPG、TIFF 转换后的图片</span>
+                </div>
+              </div>
+              <div class="canvas-hint">操作提示：拖动框选 ROI；点击 ROI 后可用方向键微调，Delete 删除；Ctrl+Z/Ctrl+Y 撤销/重做。</div>
+            </div>
+          </div>
+
+          <div class="wb-results-panel">
+            <div class="section-heading">
+              <div>
+                <h3>灰度定量结果</h3>
+                <p>积分灰度使用 ROI 内每个像素的平均强度 × 面积计算。</p>
+              </div>
+            </div>
+            <div class="table-wrap wb-table-wrap">
+              <table>
+                <thead><tr><th>类型</th><th>来源</th><th>名称</th><th>分组</th><th>位置 (px)</th><th>面积</th><th>平均灰度</th><th>积分灰度</th><th>背景强度</th><th>背景扣除</th><th>SNR</th><th>归一化</th><th>QC</th><th></th></tr></thead>
+                <tbody id="wbResultsBody"><tr class="empty-row"><td colspan="14">尚未载入图片或绘制 ROI。</td></tr></tbody>
+              </table>
+            </div>
+            <section id="wbProfilePanel" class="wb-profile-panel">
+              <div class="wb-profile-heading">
+                <div><h3>泳道纵向灰度曲线</h3><p>参考 ImageJ 的 lane profile：选择任意条带查看整条泳道的信号峰；点击曲线可把 ROI 吸附到附近峰值。</p></div>
+                <label>选择条带<select id="wbProfileSelect"><option value="">等待条带 ROI</option></select></label>
+              </div>
+              <div class="wb-profile-canvas-wrap"><canvas id="wbProfileCanvas" width="1100" height="280" aria-label="泳道纵向灰度曲线"></canvas></div>
+              <div id="wbProfileSummary" class="wb-profile-summary">载入图片并选择条带后显示曲线。</div>
+            </section>
+          </div>
+        </div>
+        </div>
+
+        <div id="wbPairWorkspace" class="pair-workspace hide">
+          <div class="pair-header">
+            <div>
+              <p class="kicker">DUAL-IMAGE NORMALIZATION</p>
+              <h2>目的蛋白灰度值分析</h2>
+              <p>内参与目的蛋白按相同泳道配对；支持自动框选、手动修正与 ROI 布局同步复制。</p>
+            </div>
+            <div class="pair-actions">
+              <label class="checkbox-row pair-checkbox"><input id="pairAutoBackground" type="checkbox" checked />自动局部背景扣除</label>
+              <button id="exportPairWb" class="button button-secondary" type="button">导出双图 CSV</button>
+              <button id="clearPairWb" class="button button-ghost danger" type="button">清空双图</button>
+            </div>
+          </div>
+
+          <div class="pair-layout">
+            <section class="pair-pane" data-pair-pane="reference">
+              <div class="pair-pane-header"><div><span class="pair-tag">Loading Adjuster</span><h3>内参</h3><p id="pairReferenceMeta">尚未载入图片</p></div><label id="openPairReferenceImage" class="button button-primary file-button direct-file-picker"><span>选择图片</span><input id="pairReferenceInput" type="file" accept=".png,.jpg,.jpeg,.tif,.tiff,.bmp,image/png,image/jpeg,image/tiff,image/bmp" aria-label="从电脑选择内参 WB 图片" /></label></div>
+              <div class="pair-canvas-frame"><canvas id="pairReferenceCanvas" aria-label="内参图像"></canvas><div id="pairReferenceEmpty" class="pair-empty">上传内参图后，在图上拖动即可手动框选。</div></div>
+              <div class="pair-pane-tools"><button data-pair-auto="reference" type="button">自动框选</button><button data-pair-clear="reference" type="button">清除本侧 ROI</button><button data-pair-copy="reference" type="button">复制内参框到目的蛋白 →</button></div>
+            </section>
+
+            <section class="pair-pane" data-pair-pane="target">
+              <div class="pair-pane-header"><div><span class="pair-tag">Protein Analysis</span><h3>目的蛋白</h3><p id="pairTargetMeta">尚未载入图片</p></div><label id="openPairTargetImage" class="button button-primary file-button direct-file-picker"><span>选择图片</span><input id="pairTargetInput" type="file" accept=".png,.jpg,.jpeg,.tif,.tiff,.bmp,image/png,image/jpeg,image/tiff,image/bmp" aria-label="从电脑选择目的蛋白 WB 图片" /></label></div>
+              <div class="pair-canvas-frame"><canvas id="pairTargetCanvas" aria-label="目的蛋白图像"></canvas><div id="pairTargetEmpty" class="pair-empty">上传目的蛋白图后，在图上拖动即可手动框选。</div></div>
+              <div class="pair-pane-tools"><button data-pair-auto="target" type="button">自动框选</button><button data-pair-clear="target" type="button">清除本侧 ROI</button><button data-pair-copy="target" type="button">← 复制目的蛋白框到内参</button></div>
+            </section>
+
+            <aside class="pair-results">
+              <h3>分析结果</h3>
+              <p class="muted">按 ROI 的泳道编号配对；若两侧框数不同，缺失的一侧显示为“—”。</p>
+              <div class="pair-table-wrap"><table><thead><tr><th>泳道</th><th>目的蛋白</th><th>内参</th><th>目的/内参</th><th>相对表达量</th><th>当前上样 (µL)</th><th>建议上样 (µL)</th><th>QC</th></tr></thead><tbody id="pairResultsBody"><tr><td colspan="8">请先载入两张图片并框选条带。</td></tr></tbody></table></div>
+              <div class="pair-settings">
+                <label>相对表达基准泳道<select id="pairBaseline"><option value="">等待 ROI</option></select></label>
+                <label>自动框选灵敏度 <span class="range-value" id="pairSensitivityValue">75</span><input id="pairSensitivity" type="range" min="35" max="90" value="75" /></label>
+                <label>预期泳道数 <span class="field-hint">弱带建议填写</span><input id="pairLaneCount" type="number" min="1" max="96" placeholder="留空自动" /></label>
+              </div>
+              <div class="pair-load-calibration">
+                <h4>内参上样量校准</h4>
+                <p>目标：让每个泳道的内参背景扣除灰度与基准泳道一致。</p>
+                <label>默认当前上样量（µL）<input id="pairDefaultLoadVolume" type="number" min="0.01" step="0.1" value="20" /></label>
+                <button id="applyPairDefaultLoad" type="button">应用默认量到全部泳道</button>
+                <p id="pairCalibrationNote" class="pair-calibration-note">建议量仅适用于内参未饱和、灰度与上样量在线性范围内且样品浓度可比的情况。</p>
+              </div>
+              <div id="pairQuickStats" class="pair-quick-stats"><div><b>0</b><span>目的蛋白条带</span></div><div><b>0</b><span>内参条带</span></div></div>
+            </aside>
+          </div>
+          <p class="pair-hint">使用提示：两张图来自同一泳道顺序时，可先在较清晰的一侧自动/手动框选，再使用“复制”同步到另一侧，并逐项确认虚线候选框。</p>
+        </div>
+
+        <div id="wbFigureWorkspace" class="figure-workspace hide">
+          <div class="figure-header">
+            <div>
+              <p class="kicker">FIGURE ANNOTATION</p>
+              <h2>WB 图注与排版</h2>
+              <p>多张 WB 图统一固定画框；按识别到的泳道从左到右放置数值与名称，并导出 PNG、可编辑 SVG 或 PDF。</p>
+            </div>
+            <div class="figure-actions">
+              <label id="openFigureImages" class="button button-primary file-button direct-file-picker"><span>上传 WB 图</span><input id="figureImageInput" type="file" accept=".png,.jpg,.jpeg,.tif,.tiff,.bmp,image/png,image/jpeg,image/tiff,image/bmp" multiple aria-label="从电脑选择一张或多张 WB 图片" /></label>
+              <button id="usePairValues" class="button button-secondary" type="button">带入双图归一化值</button>
+              <button id="exportWbFigure" class="button button-ghost" type="button">导出 600 DPI PNG</button>
+              <button id="exportWbFigureSvg" class="button button-ghost" type="button">导出可编辑 SVG</button>
+              <button id="printWbFigurePdf" class="button button-ghost" type="button">打印 / 保存 PDF</button>
+            </div>
+          </div>
+
+          <div class="figure-layout">
+            <aside class="figure-controls">
+              <h3>全局标注</h3>
+              <label>泳道名称（按左→右顺序）
+                <textarea id="figureLaneNames" rows="6" placeholder="Control, Model, Treatment-1…\n可用逗号、换行或分号分隔"></textarea>
+              </label>
+              <label>归一化数值（与泳道顺序一致）
+                <textarea id="figureValues" rows="5" placeholder="1.00, 0.76, 0.95…\n可手工输入，或从双图结果带入"></textarea>
+              </label>
+              <label>预期泳道/条带数 <span class="field-hint">不含 Marker</span>
+                <input id="figureLaneCount" type="number" min="1" max="96" placeholder="由名称数量决定" />
+              </label>
+              <div class="figure-font-grid">
+                <label>蛋白名 / kDa 字号<input id="figureSideFontSize" type="number" min="12" max="52" value="30" /></label>
+                <label>归一化数值字号<input id="figureValueFontSize" type="number" min="10" max="42" value="20" /></label>
+                <label>泳道名称字号<input id="figureLaneFontSize" type="number" min="10" max="42" value="17" /></label>
+              </div>
+              <div class="figure-crop-grid">
+                <label>条带上下留白（px）<input id="figureCropPadding" type="number" min="2" max="80" value="12" /></label>
+                <label>去背景强度（0–100）<input id="figureBackgroundStrength" type="number" min="0" max="100" value="62" disabled /></label>
+                <label class="checkbox-row"><input id="figureWhiteBackground" type="checkbox" />背景转为白色（可选，默认保留原背景）</label>
+                <label class="checkbox-row"><input id="figurePreserveColor" type="checkbox" checked disabled />严格保留条带原始颜色与灰阶</label>
+                <label class="checkbox-row"><input id="figureAutoDeskew" type="checkbox" checked />自动将条带校正到同一水平线</label>
+              </div>
+              <label class="checkbox-row"><input id="figureShowValues" type="checkbox" checked />在条带上方显示归一化值</label>
+              <label>分组标题（标题:起始-结束，每行一组）
+                <textarea id="figureGroupLabels" rows="4" placeholder="Control:1-2&#10;Treatment:3-7"></textarea>
+              </label>
+              <div class="figure-output-grid">
+                <label>版式模板<select id="figureTemplate"><option value="custom">自定义</option><option value="single">期刊单栏 85 mm</option><option value="double">期刊双栏 180 mm</option></select></label>
+                <label>自定义宽度 (mm)<input id="figureCustomWidthMm" type="number" min="20" max="500" step="1" value="180" /></label>
+                <label>输出 DPI<input id="figureDpi" type="number" min="72" max="1200" step="1" value="600" /></label>
+                <label>面板编号<input id="figurePanelLetters" type="text" placeholder="A, B, C…" /></label>
+              </div>
+              <p id="figureExportInfo" class="figure-export-info">600 DPI PNG 将写入物理分辨率元数据。</p>
+              <button id="renderWbFigure" class="button button-primary" type="button">更新图注排版</button>
+              <div class="figure-edit-actions">
+                <button id="toggleFigureManual" class="button button-ghost" type="button">手动校正条带位置</button>
+                <div class="figure-guide-actions" role="group" aria-label="手动黄线工具">
+                  <button id="selectFigureGuide" class="button button-secondary is-active" type="button" disabled>选择 / 移动</button>
+                  <button id="addFigureGuide" class="button button-secondary" type="button" disabled>＋ 增加黄线</button>
+                  <button id="deleteFigureGuide" class="button button-ghost danger" type="button" disabled>删除选中黄线</button>
+                </div>
+                <span id="figureGuideSelection" class="figure-guide-selection">尚未选择黄线</span>
+                <button id="clearFigureManual" class="text-action" type="button">恢复自动定位</button>
+              </div>
+              <p id="figureEditHint" class="figure-edit-hint">自动识别有误时，开启手动校正；可新增、拖动或删除黄线，泳道名称与归一化数值会同步增删。</p>
+              <p id="figureStatus" class="figure-status">上传一张或多张 WB 图后开始排版。每张图的黑框尺寸固定一致。</p>
+            </aside>
+
+            <section class="figure-preview-panel">
+              <div class="figure-preview-title"><h3>排版预览</h3><span>紧凑黑框 · Times New Roman · PNG（含 DPI 元数据）/ SVG / PDF</span></div>
+              <div class="figure-canvas-wrap"><canvas id="wbFigureCanvas" width="1200" height="420" aria-label="WB 图注排版预览"></canvas></div>
+            </section>
+
+            <aside class="figure-image-settings">
+              <h3>每张图图注</h3>
+              <p>蛋白名称和分子量会分别放在黑框左侧与右侧。</p>
+              <div id="figurePanelInputs" class="figure-panel-inputs"><p class="muted">尚未上传图片。</p></div>
+            </aside>
+          </div>
+          <p class="figure-hint">说明：泳道名称不是 OCR 识别，而是按你输入的顺序映射至图像中由左到右识别到的主条带；若自动结果与实验泳道不符，请先回到“单图 ROI 定量”确认条带。</p>
+        </div>
+      </section>
+    </main>
+
+    <footer class="app-footer">
+      <div><strong>BioAssay Studio v2.4.0</strong><span>科研数据在当前浏览器中处理，网站不接收上传内容。</span></div>
+      <nav aria-label="网站信息"><a href="privacy.html">隐私与数据处理</a><a href="THIRD_PARTY_NOTICES.txt">第三方许可</a><a href="README.md">使用说明</a></nav>
+    </footer>
+
+    <dialog id="sheetDialog" class="sheet-dialog">
+      <form method="dialog">
+        <h3>选择包含 qPCR 数据的工作表</h3>
+        <p>检测到多个工作表，请选择 Ct/Cq、样本和基因名称所在的表。</p>
+        <div id="sheetChoices" class="sheet-choices"></div>
+        <div class="dialog-actions"><button value="cancel" class="button button-ghost">取消</button><button id="confirmSheet" value="default" class="button button-primary">确认并继续</button></div>
+      </form>
+    </dialog>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    <script src="analysis-core.js"></script>
+    <script src="vendor/xlsx.full.min.js"></script>
+    <script src="vendor/chart.umd.js"></script>
+    <script src="vendor/UTIF.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,92 @@
+﻿[
+    {
+        "path":  ".nojekyll",
+        "bytes":  23,
+        "sha256":  "1f05e44f40cf683d90b6c61c0a47b9082a85f4826d8cdcf425583a2a33b689ce"
+    },
+    {
+        "path":  "analysis-core.js",
+        "bytes":  10160,
+        "sha256":  "9f1445f8c01a1d76e33fe2afb8d8bd7071b67301cfbbd33b1fb9b4f2c78e4cec"
+    },
+    {
+        "path":  "app.js",
+        "bytes":  196804,
+        "sha256":  "c92eb9a28f107fb40b34552d26b8caec4d27c427d8fd6bb7143bcf333ac2c4a6"
+    },
+    {
+        "path":  "icon.svg",
+        "bytes":  445,
+        "sha256":  "c3b55470e467024b411273440ae38464cc5127a56c5b872e18c5a50baae58cbb"
+    },
+    {
+        "path":  "index.html",
+        "bytes":  24055,
+        "sha256":  "5871d56b33ed25832596fe0b597838dedb010a518bfc1c6dd7788d8bf0f4e962"
+    },
+    {
+        "path":  "manifest.webmanifest",
+        "bytes":  435,
+        "sha256":  "675558df0591d5f6424aa541e66b8ba313c42139c56eee68dd1079aafed784d6"
+    },
+    {
+        "path":  "privacy.html",
+        "bytes":  2964,
+        "sha256":  "2361491d4da729f594d1078b720cef3a52ecfad2cb61cff88cde1d853bfff756"
+    },
+    {
+        "path":  "README.md",
+        "bytes":  4429,
+        "sha256":  "b635cb1300dd84a184139f8c23b7dd8ac2c2848dccb71d48e44daa2d4d39e645"
+    },
+    {
+        "path":  "robots.txt",
+        "bytes":  24,
+        "sha256":  "c70abcf98d7c268caa7a66739104962b1f5304d39762201e1074cacfcaba3134"
+    },
+    {
+        "path":  "service-worker.js",
+        "bytes":  1656,
+        "sha256":  "22b69064af21a7a3824afb1d6a23dc255f63acf155c0c8f8681888f49aa57c95"
+    },
+    {
+        "path":  "styles.css",
+        "bytes":  29394,
+        "sha256":  "b2348e5f7ad44d68eab7fecf4b9e79e18b1958b18f4592ae09801d08cf82a0c7"
+    },
+    {
+        "path":  "THIRD_PARTY_NOTICES.txt",
+        "bytes":  947,
+        "sha256":  "86e9c43ad9d0446ccf0073b9c89fe34e5fab1cd6817706030b03f1cedda47052"
+    },
+    {
+        "path":  "vendor/chart.umd.js",
+        "bytes":  208518,
+        "sha256":  "ecc3cd1eeb8c34d2178e3f59fd63ec5a3d84358c11730af0b9958dc886d7652a"
+    },
+    {
+        "path":  "vendor/CHARTJS-LICENSE.txt",
+        "bytes":  1093,
+        "sha256":  "41a84aa2caba645f966a18d9c2056b73e6d3a81d80bc0046bc0011a2634d4cce"
+    },
+    {
+        "path":  "vendor/SHEETJS-LICENSE.txt",
+        "bytes":  11358,
+        "sha256":  "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+    },
+    {
+        "path":  "vendor/UTIF.js",
+        "bytes":  58271,
+        "sha256":  "e3e76115f49571e39624c3316a76b3c4c5b2c5ca518dfec4b66a9f7af8c6d059"
+    },
+    {
+        "path":  "vendor/UTIF-LICENSE.txt",
+        "bytes":  1065,
+        "sha256":  "c1fb8861eca211bf5aea574358aba7039396c0c1824c2a1477cc126d398efd89"
+    },
+    {
+        "path":  "vendor/xlsx.full.min.js",
+        "bytes":  951904,
+        "sha256":  "cc015130aa8521e7f088f88898eba949ccdcbfb38df0bd129b44b7273c3a6f41"
+    }
+]
