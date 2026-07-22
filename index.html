@@ -9,7 +9,7 @@
     <link rel="icon" href="icon.svg" type="image/svg+xml" />
     <link rel="manifest" href="manifest.webmanifest" />
     <title>BioAssay Studio | qPCR 与 WB 定量</title>
-    <link rel="stylesheet" href="styles.css" />
+    <link rel="stylesheet" href="styles.css?v=2.5.0-r3" />
   </head>
   <body>
     <header class="app-header">
@@ -109,6 +109,9 @@
                 <label>预期泳道/条带数 <span class="field-hint">不含 Marker；按实际样品泳道数填写</span>
                   <input id="autoLaneCount" type="number" min="1" max="96" placeholder="留空自动" />
                 </label>
+                <label>忽略左侧 Marker 区域（%） <span class="field-hint">0 表示不忽略</span>
+                  <input id="autoMarkerPercent" type="number" min="0" max="40" step="1" value="0" />
+                </label>
                 <div class="compact-control-grid">
                   <label>每泳道最多条带<input id="autoBandsPerLane" type="number" min="1" max="8" value="1" /></label>
                   <label>纵向最小峰距（px）<input id="autoBandGap" type="number" min="2" max="160" value="12" /></label>
@@ -207,6 +210,7 @@
                 <label>相对表达基准泳道<select id="pairBaseline"><option value="">等待 ROI</option></select></label>
                 <label>自动框选灵敏度 <span class="range-value" id="pairSensitivityValue">75</span><input id="pairSensitivity" type="range" min="35" max="90" value="75" /></label>
                 <label>预期泳道数 <span class="field-hint">弱带建议填写</span><input id="pairLaneCount" type="number" min="1" max="96" placeholder="留空自动" /></label>
+                <label>忽略左侧 Marker（%） <span class="field-hint">两图一致</span><input id="pairMarkerPercent" type="number" min="0" max="40" step="1" value="0" /></label>
               </div>
               <div class="pair-load-calibration">
                 <h4>内参上样量校准</h4>
@@ -248,6 +252,9 @@
               </label>
               <label>预期泳道/条带数 <span class="field-hint">不含 Marker</span>
                 <input id="figureLaneCount" type="number" min="1" max="96" placeholder="由名称数量决定" />
+              </label>
+              <label>忽略左侧 Marker 区域（%） <span class="field-hint">0 表示不忽略</span>
+                <input id="figureMarkerPercent" type="number" min="0" max="40" step="1" value="0" />
               </label>
               <div class="figure-font-grid">
                 <label>蛋白名 / kDa 字号<input id="figureSideFontSize" type="number" min="12" max="52" value="30" /></label>
@@ -304,7 +311,7 @@
     </main>
 
     <footer class="app-footer">
-      <div><strong>BioAssay Studio v2.4.0</strong><span>科研数据在当前浏览器中处理，网站不接收上传内容。</span></div>
+      <div><strong>BioAssay Studio v2.5.0</strong><span>科研数据在当前浏览器中处理，网站不接收上传内容。</span></div>
       <nav aria-label="网站信息"><a href="privacy.html">隐私与数据处理</a><a href="THIRD_PARTY_NOTICES.txt">第三方许可</a><a href="README.md">使用说明</a></nav>
     </footer>
 
@@ -318,10 +325,10 @@
     </dialog>
 
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
-    <script src="analysis-core.js"></script>
+    <script src="analysis-core.js?v=2.5.0-r3"></script>
     <script src="vendor/xlsx.full.min.js"></script>
     <script src="vendor/chart.umd.js"></script>
     <script src="vendor/UTIF.js"></script>
-    <script src="app.js"></script>
+    <script src="app.js?v=2.5.0-r3"></script>
   </body>
 </html>

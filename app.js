@@ -7,7 +7,7 @@
   const toast = $('#toast');
   const sheetDialog = $('#sheetDialog');
   const core = window.BioAssayCore;
-  const APP_VERSION = '2.4.0';
+  const APP_VERSION = '2.5.0';
   const auditLog = [];
   const history = { undo: [], redo: [], applying: false, max: 50 };
 
@@ -895,7 +895,7 @@
     return values;
   }
 
-  function bandQuality({ saturatedFraction = 0, corrected = NaN, snr = NaN, backgroundAvailable = true, touchesEdge = false, confidence = null, boundary = null } = {}) {
+  function bandQuality({ saturatedFraction = 0, corrected = NaN, snr = NaN, backgroundAvailable = true, touchesEdge = false, confidence = null, boundary = null, edgeConfidence = null, edgeClipped = false } = {}) {
     const issues = [];
     let severity = 'good';
     if (saturatedFraction >= 0.01) {
@@ -919,6 +919,14 @@
     }
     if (Number.isFinite(confidence) && confidence < 25) {
       issues.push('低置信候选');
+      if (severity === 'good') severity = 'warn';
+    }
+    if (Number.isFinite(edgeConfidence) && edgeConfidence < 0.25) {
+      issues.push('横向边界不确定');
+      if (severity === 'good') severity = 'warn';
+    }
+    if (edgeClipped) {
+      issues.push('边界接近相邻泳道');
       if (severity === 'good') severity = 'warn';
     }
     if (boundary?.severity === 'warn') {
@@ -1188,9 +1196,15 @@
     });
   }
 
-  function findBandCandidatesFromMap(map, sourceWidth, sourceHeight, sensitivity, expectedLaneCount = 0, bandsPerLane = 5, minimumBandGap = 0) {
+  function findBandCandidatesFromMap(map, sourceWidth, sourceHeight, sensitivity, expectedLaneCount = 0, bandsPerLane = 5, minimumBandGap = 0, ignoredLeftPercent = 0) {
     const { signal, width, height, scale } = map;
-    const rawBounds = findBlotBounds(map);
+    const detectedBounds = findBlotBounds(map);
+    const normalizedIgnoredLeft = clamp(number(ignoredLeftPercent, 0), 0, 40);
+    const ignoredLeftEdge = clamp(Math.round(width * normalizedIgnoredLeft / 100), 0, Math.max(0, width - 3));
+    const rawBounds = {
+      ...detectedBounds,
+      x0: clamp(Math.max(detectedBounds.x0, ignoredLeftEdge), 0, Math.max(0, detectedBounds.x1 - 2)),
+    };
     const verticalInset = clamp(Math.round((rawBounds.y1 - rawBounds.y0 + 1) * 0.07), 3, Math.max(3, Math.round((rawBounds.y1 - rawBounds.y0 + 1) * 0.18)));
     const bounds = {
       ...rawBounds,
@@ -1261,60 +1275,82 @@
           const keep = Math.max(2, Math.round(columnSignal.length * 0.34));
           horizontal.push(columnSignal.slice(0, keep).reduce((sum, value) => sum + value, 0) / keep);
         }
-        const horizontalFloor = percentile(horizontal, 0.22);
-        const horizontalWeights = horizontal.map(value => Math.max(0, value - horizontalFloor));
-        const horizontalTotal = horizontalWeights.reduce((sum, value) => sum + value, 0);
-        let horizontalPeak = 0;
-        for (let index = 1; index < horizontal.length; index += 1) if (horizontal[index] > horizontal[horizontalPeak]) horizontalPeak = index;
-        const horizontalPeakValue = horizontal[horizontalPeak] || horizontalFloor;
-        const edgeThreshold = horizontalFloor + Math.max(0.4, horizontalPeakValue - horizontalFloor) * 0.01;
-        // Diffuse or slightly tilted bands can contain a short low-signal notch
-        // near one end. Bridge only small internal gaps inside this lane's
-        // search window, then retain the last real signal pixel as the edge.
         const maximumEdgeGap = Math.max(1, Math.round(typicalPitch * 0.09));
-        let signalLeft = horizontalPeak;
-        let signalRight = horizontalPeak;
-        let gap = 0;
-        for (let index = horizontalPeak - 1; index >= 0; index -= 1) {
-          if (horizontal[index] >= edgeThreshold) {
-            signalLeft = index;
-            gap = 0;
-          } else if (++gap > maximumEdgeGap) break;
-        }
-        gap = 0;
-        for (let index = horizontalPeak + 1; index < horizontal.length; index += 1) {
-          if (horizontal[index] >= edgeThreshold) {
-            signalRight = index;
-            gap = 0;
-          } else if (++gap > maximumEdgeGap) break;
-        }
-        const signalRunWidth = signalRight - signalLeft + 1;
-        const boundaryCenter = searchX0 + (signalLeft + signalRight) / 2;
-        const weightedCenter = horizontalTotal > 0
-          ? searchX0 + horizontalWeights.reduce((sum, value, index) => sum + value * index, 0) / horizontalTotal
-          : laneCenter;
-        const refinedCenter = signalRunWidth >= Math.max(4, (lane.x1 - lane.x0 + 1) * 0.18) ? boundaryCenter : weightedCenter;
         const laneWidth = lane.x1 - lane.x0 + 1;
-        const x = clamp((refinedCenter - laneWidth / 2) * scale, 0, sourceWidth - 1);
+        const adaptiveBounds = core.refineSignalBounds(horizontal, {
+          maximumGap: maximumEdgeGap,
+          minimumPadding: Math.max(2, Math.round(typicalPitch * 0.035)),
+          paddingFraction: 0.09,
+          thresholdFraction: 0.045,
+          noiseMultiplier: 0.9,
+        });
+        const candidateScore = clamp((peak.score - stats.average) / Math.max(stats.spread * 4, 1), 0.01, 0.99);
+        const refinedCenter = adaptiveBounds.usable ? searchX0 + adaptiveBounds.center : laneCenter;
+        let fittedLeft = adaptiveBounds.usable ? searchX0 + adaptiveBounds.left : Math.round(refinedCenter - laneWidth * 0.36);
+        let fittedRight = adaptiveBounds.usable ? searchX0 + adaptiveBounds.right : Math.round(refinedCenter + laneWidth * 0.36);
+        const minimumWidthFraction = peak.forcedWeak || lane.weakGapFill ? 0.54 : 0.38;
+        const weakBand = Boolean(peak.forcedWeak || lane.weakGapFill);
+        const minimumWidthBase = weakBand ? Math.min(laneWidth, typicalPitch * 0.95) : laneWidth;
+        const minimumRoiWidth = Math.min(searchX1 - searchX0 + 1, Math.max(5, Math.round(minimumWidthBase * minimumWidthFraction)));
+        if (fittedRight - fittedLeft + 1 < minimumRoiWidth) {
+          fittedLeft = Math.round(refinedCenter - minimumRoiWidth / 2);
+          fittedRight = fittedLeft + minimumRoiWidth - 1;
+        }
+        // Broad saturated bands often have low-contrast shoulders even though
+        // their core signal is strong. If edge confidence is low but the peak
+        // itself is reliable, preserve a small symmetric guard band so the
+        // visible shoulders are not cut in half (common for L1/L5-like bands).
+        const guardExpanded = adaptiveBounds.confidence < 0.25 && candidateScore >= 0.25;
+        if (guardExpanded) {
+          // Keep a little real background around broad/saturated shoulders.
+          // A wider protected margin is especially important for the first
+          // sample lane: unlike an interior lane it has no sample neighbour on
+          // the marker side to reveal that an edge was clipped.
+          const guard = Math.max(5, Math.round(typicalPitch * 0.14));
+          fittedLeft -= guard;
+          fittedRight += guard;
+        }
+        // Very weak bands can make a noise-level edge trace span almost the
+        // entire lane. Keep the peak centre, but focus the ROI to the minimum
+        // validated weak-band width instead of retaining mostly blank pixels.
+        const weakFocused = candidateScore < 0.14;
+        if (weakFocused) {
+          const focusedWidth = Math.max(minimumRoiWidth, Math.round(typicalPitch * 0.52));
+          fittedLeft = Math.round(refinedCenter - focusedWidth / 2);
+          fittedRight = fittedLeft + focusedWidth - 1;
+        }
+        // Let only the protective guard cross the lane midpoint by a small
+        // amount. The final neighbour-separation pass still guarantees that
+        // two ROIs never overlap.
+        const guardOverflow = guardExpanded ? Math.max(4, Math.round(typicalPitch * 0.14)) : 0;
+        const fitX0 = clamp(searchX0 - guardOverflow, bounds.x0, searchX0);
+        const fitX1 = clamp(searchX1 + guardOverflow, searchX1, bounds.x1);
+        fittedLeft = clamp(fittedLeft, fitX0, Math.max(fitX0, fitX1 - minimumRoiWidth + 1));
+        fittedRight = clamp(fittedRight, fittedLeft + 1, fitX1);
+        const x = clamp(fittedLeft * scale, 0, sourceWidth - 1);
         const y = clamp((lane.y0 + start - paddingY) * scale, 0, sourceHeight - 1);
-        const right = clamp((refinedCenter + laneWidth / 2) * scale, x + 1, sourceWidth);
+        const right = clamp((fittedRight + 1) * scale, x + 1, sourceWidth);
         const bottom = clamp((lane.y0 + end + paddingY + 1) * scale, y + 1, sourceHeight);
         candidates.push({
           x: Math.round(x), y: Math.round(y), width: Math.round(right - x), height: Math.round(bottom - y),
-          score: clamp((peak.score - stats.average) / Math.max(stats.spread * 4, 1), 0.01, 0.99),
+          score: candidateScore,
           laneIndex,
           bandIndex,
+          edgeConfidence: adaptiveBounds.confidence,
+          edgeClipped: Boolean(adaptiveBounds.clippedLeft || adaptiveBounds.clippedRight),
+          guardExpanded,
+          weakFocused,
           weakGapFill: Boolean(lane.weakGapFill || peak.forcedWeak),
         });
       });
     });
-    return { candidates, bounds, lanes };
+    return { candidates, bounds, lanes, ignoredLeftPercent: normalizedIgnoredLeft };
   }
 
   function findWbBandCandidates(map, expectedLaneCount = 0) {
     const bandsPerLane = clamp(Math.round(number($('#autoBandsPerLane').value, 1)), 1, 8);
     const minimumBandGap = clamp(Math.round(number($('#autoBandGap').value, 12)), 2, 160);
-    return findBandCandidatesFromMap(map, canvas.width, canvas.height, number($('#autoSensitivity').value, 65), expectedLaneCount, bandsPerLane, minimumBandGap);
+    return findBandCandidatesFromMap(map, canvas.width, canvas.height, number($('#autoSensitivity').value, 65), expectedLaneCount, bandsPerLane, minimumBandGap, number($('#autoMarkerPercent').value, 0));
   }
 
   function findWbBackgroundCandidate(map, bounds, exclusions = []) {
@@ -1454,9 +1490,10 @@
     wb.selectedId = generated.find(roi => roi.type === 'band')?.id || '';
     const backgroundCount = generated.filter(roi => roi.type === 'background').length;
     const laneSource = expectedLaneCount ? `按填写的 ${expectedLaneCount} 个泳道` : `自动估计的 ${detection.lanes.length} 个泳道`;
-    $('#autoDetectionNote').textContent = generated.length ? `已定位膜区域，并${laneSource}推荐 ${selected.length} 个条带和 ${backgroundCount} 个背景 ROI。虚线框为候选结果，请在导出前人工确认。` : '未找到足够清晰的候选条带；请提高灵敏度，或填写预期泳道数后重试。';
+    const markerNote = detection.ignoredLeftPercent ? `，已忽略左侧 ${fmt(detection.ignoredLeftPercent, 0)}% Marker 区域` : '';
+    $('#autoDetectionNote').textContent = generated.length ? `已定位膜区域${markerNote}，并${laneSource}推荐 ${selected.length} 个条带和 ${backgroundCount} 个背景 ROI。候选框已按真实信号边缘精修，请在导出前人工确认。` : '未找到足够清晰的候选条带；请提高灵敏度，或填写预期泳道数后重试。';
     updateWb();
-    recordAudit('wb-auto-detect', { expectedLaneCount, bandsPerLane, selectedBands: selected.length, backgroundCount });
+    recordAudit('wb-auto-detect', { expectedLaneCount, ignoredLeftPercent: detection.ignoredLeftPercent, bandsPerLane, selectedBands: selected.length, backgroundCount });
     if (generated.length) toastMessage(`自动识别完成：${selected.length} 个候选条带。`);
   }
 
@@ -1597,7 +1634,7 @@
       const snr = background.available ? correctedMean / Math.max(background.sd || 0, 1) : NaN;
       const touchesEdge = row.x <= 1 || row.y <= 1 || row.x + row.width >= canvas.width - 1 || row.y + row.height >= canvas.height - 1;
       const boundary = core.signalBoundaryQuality(horizontalSignalProfile(wb.source, wb.imageCtx, row, $('#invertIntensity').checked));
-      const quality = bandQuality({ saturatedFraction: row.saturatedFraction, corrected, snr, backgroundAvailable: background.available, touchesEdge, confidence: row.confidence, boundary });
+      const quality = bandQuality({ saturatedFraction: row.saturatedFraction, corrected, snr, backgroundAvailable: background.available, touchesEdge, confidence: row.confidence, boundary, edgeConfidence: row.edgeConfidence, edgeClipped: row.edgeClipped });
       const analysisExcluded = Boolean(row.excluded || ($('#wbAutoExcludeBad').checked && quality.severity === 'bad' && !row.forceInclude));
       return { ...row, backgroundIntensity: background.intensity, backgroundSd: background.sd, backgroundLabel: background.label, correctedMean, corrected, snr, globalBackground, boundary, quality, analysisExcluded };
     });
@@ -1992,7 +2029,7 @@
       const snr = background.available ? correctedMean / Math.max(background.sd || 0, 1) : NaN;
       const touchesEdge = roi.x <= 1 || roi.y <= 1 || roi.x + roi.width >= pane.canvas.width - 1 || roi.y + roi.height >= pane.canvas.height - 1;
       const boundary = core.signalBoundaryQuality(horizontalSignalProfile(pane.source, pane.imageCtx, roi, true));
-      const quality = bandQuality({ saturatedFraction: measurement.saturatedFraction, corrected, snr, backgroundAvailable: background.available, touchesEdge, confidence: roi.confidence, boundary });
+      const quality = bandQuality({ saturatedFraction: measurement.saturatedFraction, corrected, snr, backgroundAvailable: background.available, touchesEdge, confidence: roi.confidence, boundary, edgeConfidence: roi.edgeConfidence, edgeClipped: roi.edgeClipped });
       return { ...roi, lane: roi.lane || index + 1, ...measurement, background: background.intensity, backgroundSd: background.sd, correctedMean, corrected, snr, boundary, quality };
     });
   }
@@ -2103,7 +2140,7 @@
     if (!pane.image) return toastMessage(`请先载入${pane.label}图片。`);
     pushHistory(`${pane.label}自动识别 ROI`);
     const expectedLanes = clamp(Math.round(number($('#pairLaneCount').value, 0)), 0, 96);
-    const detection = findBandCandidatesFromMap(pairSignalMap(pane), pane.canvas.width, pane.canvas.height, number($('#pairSensitivity').value, 75), expectedLanes);
+    const detection = findBandCandidatesFromMap(pairSignalMap(pane), pane.canvas.width, pane.canvas.height, number($('#pairSensitivity').value, 75), expectedLanes, 5, 0, number($('#pairMarkerPercent').value, 0));
     const strongestByLane = new Map();
     detection.candidates.sort((a, b) => b.score - a.score).forEach(candidate => {
       if (!strongestByLane.has(candidate.laneIndex)) strongestByLane.set(candidate.laneIndex, candidate);
@@ -2235,7 +2272,7 @@
   function figureLaneCandidates(entry, expectedCount) {
     const sourceWidth = entry.image.naturalWidth || entry.image.width;
     const sourceHeight = entry.image.naturalHeight || entry.image.height;
-    const detection = findBandCandidatesFromMap(figureSignalMap(entry.image), sourceWidth, sourceHeight, 65, expectedCount);
+    const detection = findBandCandidatesFromMap(figureSignalMap(entry.image), sourceWidth, sourceHeight, 65, expectedCount, 5, 0, number($('#figureMarkerPercent').value, 0));
     const strongestByLane = new Map();
     detection.candidates.sort((a, b) => b.score - a.score).forEach(candidate => {
       if (!strongestByLane.has(candidate.laneIndex)) strongestByLane.set(candidate.laneIndex, candidate);
@@ -2956,9 +2993,9 @@
   }
 
   const projectControlIds = [
-    'invertIntensity', 'autoSensitivity', 'autoMaxBands', 'autoLaneCount', 'autoBandsPerLane', 'autoBandGap', 'autoBackground', 'wbAutoExcludeBad', 'backgroundMode',
-    'roiType', 'roiName', 'roiGroup', 'pairAutoBackground', 'pairSensitivity', 'pairLaneCount', 'pairDefaultLoadVolume',
-    'figureLaneNames', 'figureValues', 'figureLaneCount', 'figureSideFontSize', 'figureValueFontSize', 'figureLaneFontSize',
+    'invertIntensity', 'autoSensitivity', 'autoMaxBands', 'autoLaneCount', 'autoMarkerPercent', 'autoBandsPerLane', 'autoBandGap', 'autoBackground', 'wbAutoExcludeBad', 'backgroundMode',
+    'roiType', 'roiName', 'roiGroup', 'pairAutoBackground', 'pairSensitivity', 'pairLaneCount', 'pairMarkerPercent', 'pairDefaultLoadVolume',
+    'figureLaneNames', 'figureValues', 'figureLaneCount', 'figureMarkerPercent', 'figureSideFontSize', 'figureValueFontSize', 'figureLaneFontSize',
     'figureCropPadding', 'figureBackgroundStrength', 'figureWhiteBackground', 'figurePreserveColor', 'figureAutoDeskew', 'figureShowValues',
     'figureGroupLabels', 'figureTemplate', 'figureCustomWidthMm', 'figureDpi', 'figurePanelLetters',
   ];

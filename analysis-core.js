@@ -103,6 +103,109 @@
     };
   }
 
+  function refineSignalBounds(profile, options = {}) {
+    const values = Array.from(profile || [], value => Number(value));
+    const length = values.length;
+    if (length < 3 || values.some(value => !Number.isFinite(value))) {
+      return {
+        left: 0,
+        right: Math.max(0, length - 1),
+        signalLeft: 0,
+        signalRight: Math.max(0, length - 1),
+        center: Math.max(0, (length - 1) / 2),
+        confidence: 0,
+        usable: false,
+      };
+    }
+    const smoothRadius = Math.max(0, Math.min(5, Math.round(Number(options.smoothRadius) || length * 0.012)));
+    const prefix = [0];
+    values.forEach(value => prefix.push(prefix[prefix.length - 1] + value));
+    const smoothed = values.map((_, index) => {
+      const start = Math.max(0, index - smoothRadius);
+      const end = Math.min(length - 1, index + smoothRadius);
+      return (prefix[end + 1] - prefix[start]) / (end - start + 1);
+    });
+    const sorted = smoothed.slice().sort((a, b) => a - b);
+    // Wide WB bands can occupy most of a lane window. Keeping the baseline
+    // sample deliberately small prevents the band shoulders from being
+    // mistaken for noise, which otherwise clips one side of broad bands.
+    const baselineCount = Math.max(2, Math.ceil(length * 0.22));
+    const baselineValues = sorted.slice(0, baselineCount);
+    const baseline = median(baselineValues);
+    const deviations = baselineValues.map(value => Math.abs(value - baseline));
+    const noise = Math.max(
+      1e-9,
+      median(deviations) * 1.4826,
+      (sorted[Math.min(length - 1, Math.floor(length * 0.3))] - sorted[Math.floor(length * 0.08)]) * 0.42,
+    );
+    let peakIndex = 0;
+    for (let index = 1; index < length; index += 1) if (smoothed[index] > smoothed[peakIndex]) peakIndex = index;
+    const peak = smoothed[peakIndex];
+    const amplitude = Math.max(0, peak - baseline);
+    if (!(amplitude > noise * 1.15)) {
+      return {
+        left: 0,
+        right: length - 1,
+        signalLeft: peakIndex,
+        signalRight: peakIndex,
+        center: peakIndex,
+        baseline,
+        peak,
+        noise,
+        threshold: baseline + noise,
+        confidence: 0,
+        usable: false,
+      };
+    }
+    const thresholdFraction = Math.max(0.025, Math.min(0.3, Number(options.thresholdFraction) || 0.07));
+    const noiseMultiplier = Math.max(0.6, Math.min(3, Number(options.noiseMultiplier) || 1.45));
+    const threshold = baseline + Math.max(amplitude * thresholdFraction, noise * noiseMultiplier);
+    const maximumGap = Math.max(1, Math.min(Math.floor(length * 0.14), Math.round(Number(options.maximumGap) || length * 0.045)));
+    let signalLeft = peakIndex;
+    let signalRight = peakIndex;
+    let gap = 0;
+    for (let index = peakIndex - 1; index >= 0; index -= 1) {
+      if (smoothed[index] >= threshold) {
+        signalLeft = index;
+        gap = 0;
+      } else if (++gap > maximumGap) break;
+    }
+    gap = 0;
+    for (let index = peakIndex + 1; index < length; index += 1) {
+      if (smoothed[index] >= threshold) {
+        signalRight = index;
+        gap = 0;
+      } else if (++gap > maximumGap) break;
+    }
+    const signalWidth = signalRight - signalLeft + 1;
+    const paddingFraction = Math.max(0, Math.min(0.5, Number(options.paddingFraction) || 0.16));
+    const padding = Math.max(1, Math.round(Number(options.minimumPadding) || 1), Math.round(signalWidth * paddingFraction));
+    const left = Math.max(0, signalLeft - padding);
+    const right = Math.min(length - 1, signalRight + padding);
+    const weights = smoothed.slice(signalLeft, signalRight + 1).map(value => Math.max(0, value - baseline));
+    const totalWeight = weights.reduce((sum, value) => sum + value, 0);
+    const center = totalWeight > 0
+      ? signalLeft + weights.reduce((sum, value, index) => sum + value * index, 0) / totalWeight
+      : (signalLeft + signalRight) / 2;
+    const signalToNoise = amplitude / Math.max(noise, 1e-9);
+    const confidence = Math.max(0, Math.min(1, (1 - Math.exp(-signalToNoise / 5)) * Math.min(1, signalWidth / Math.max(3, length * 0.18))));
+    return {
+      left,
+      right,
+      signalLeft,
+      signalRight,
+      center,
+      baseline,
+      peak,
+      noise,
+      threshold,
+      confidence,
+      usable: true,
+      clippedLeft: signalLeft === 0 && smoothed[0] >= threshold,
+      clippedRight: signalRight === length - 1 && smoothed[length - 1] >= threshold,
+    };
+  }
+
   function separateNeighborRois(rois, minimumWidth = 4) {
     const selected = (rois || []).map(roi => ({ ...roi })).sort((a, b) => (a.x + a.width / 2) - (b.x + b.width / 2));
     selected.forEach((candidate, index) => {
@@ -234,6 +337,7 @@
     editLaneAnnotations,
     pixelsForPhysicalWidth,
     readPngDpi,
+    refineSignalBounds,
     roiConsistency,
     separateNeighborRois,
     setPngDpi,
