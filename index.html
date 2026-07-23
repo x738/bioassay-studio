@@ -9,7 +9,7 @@
     <link rel="icon" href="icon.svg" type="image/svg+xml" />
     <link rel="manifest" href="manifest.webmanifest" />
     <title>BioAssay Studio | qPCR 与 WB 定量</title>
-    <link rel="stylesheet" href="styles.css?v=2.5.1-r26" />
+    <link rel="stylesheet" href="styles.css?v=2.5.1-r32" />
   </head>
   <body>
     <header class="app-header">
@@ -116,7 +116,7 @@
                   <input id="autoEdgePadding" type="number" min="0" max="30" step="1" value="4" />
                 </label>
                 <div class="compact-control-grid">
-                  <label>每泳道条带数 <span class="field-hint">0 = 自动判断</span><input id="autoBandsPerLane" type="number" min="0" max="8" value="0" /></label>
+                  <label>每泳道条带数 <span class="field-hint">0 = 仅取主条带；多排图请填写</span><input id="autoBandsPerLane" type="number" min="0" max="8" value="0" /></label>
                   <label>纵向最小峰距（px）<input id="autoBandGap" type="number" min="2" max="160" value="12" /></label>
                 </div>
                 <label class="checkbox-row"><input id="autoBackground" type="checkbox" checked />添加自动背景 ROI</label>
@@ -272,10 +272,10 @@
                 <input id="figureMarkerPercent" type="number" min="0" max="40" step="1" value="0" />
               </label>
               <div class="figure-font-grid">
-                <label>蛋白名字号<input id="figureProteinFontSize" type="number" min="12" max="52" value="30" /></label>
-                <label>kDa 字号<input id="figureMassFontSize" type="number" min="10" max="52" value="25" /></label>
-                <label>归一化数值字号<input id="figureValueFontSize" type="number" min="10" max="42" value="20" /></label>
-                <label>泳道名称字号<input id="figureLaneFontSize" type="number" min="10" max="42" value="17" /></label>
+                <label>蛋白名字号（pt）<input id="figureProteinFontSize" type="number" min="6" max="36" step="0.5" value="13" /></label>
+                <label>kDa 字号（pt）<input id="figureMassFontSize" type="number" min="6" max="36" step="0.5" value="11" /></label>
+                <label>归一化数值字号（pt）<input id="figureValueFontSize" type="number" min="6" max="24" step="0.5" value="9" /></label>
+                <label>泳道名称字号（pt）<input id="figureLaneFontSize" type="number" min="6" max="24" step="0.5" value="10" /></label>
               </div>
               <div class="figure-output-grid">
                 <label>排版模式<select id="figureCompositionMode"><option value="panels">多面板（显示 A/B/C…）</option><option value="integrated">完整图（无面板角标）</option></select></label>
@@ -356,10 +356,10 @@
     </dialog>
 
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
-    <script src="analysis-core.js?v=2.5.1-r1"></script>
+    <script src="analysis-core.js?v=2.5.1-r2"></script>
     <script src="vendor/xlsx.full.min.js"></script>
     <script src="vendor/chart.umd.js"></script>
     <script src="vendor/UTIF.js"></script>
-    <script src="app.js?v=2.5.1-r26"></script>
+    <script src="app.js?v=2.5.1-r32"></script>
   </body>
 </html>
