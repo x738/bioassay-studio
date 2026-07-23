@@ -64,6 +64,7 @@
     frameResize: null,
     selectedImageIndex: 0,
     layouts: [],
+    effectiveFrame: null,
   };
 
   const foldChangeErrorBars = {
@@ -3158,7 +3159,7 @@
     const perImageFields = $('#figureLaneScope').value === 'per-image'
       ? `<label>本图期望泳道/条带数 <span class="field-hint">可选，不含 Marker</span><input data-figure-field="laneCount" data-figure-index="${index}" type="number" min="1" max="96" value="${laneCount || ''}" placeholder="留空自动识别" /></label><label>本图泳道名称（左→右）<textarea data-figure-field="laneNames" data-figure-index="${index}" rows="5" placeholder="Control, Model, Treatment…">${escapeHtml(entry.laneNames || '')}</textarea></label><label>本图归一化数值<textarea data-figure-field="values" data-figure-index="${index}" rows="4" placeholder="1.00, 0.76, 0.95…">${escapeHtml(entry.values || '')}</textarea></label>`
       : '<small>当前为“整组共用”，泳道名称和数值请在左侧全局标注中填写。</small>';
-    host.innerHTML = `<div class="figure-panel-card"><strong>图 ${index + 1} · ${escapeHtml(entry.name)}</strong><label>蛋白名称<input data-figure-field="protein" data-figure-index="${index}" value="${escapeHtml(entry.protein)}" placeholder="如：α-Tubulin" /></label><label>分子量（kDa）<input data-figure-field="mass" data-figure-index="${index}" value="${escapeHtml(entry.mass)}" placeholder="如：50" /></label>${perImageFields}<label>水平角度微调（°）<input data-figure-field="rotation" data-figure-index="${index}" type="number" min="-12" max="12" step="0.1" value="${escapeHtml(entry.rotation ?? 0)}" /></label><div class="figure-zoom-row"><label>图像缩放（等比）<input class="figure-zoom-slider" data-figure-field="zoom" data-figure-index="${index}" type="range" min="50" max="240" step="0.1" value="${zoom}" /></label><label class="figure-zoom-number">缩放（%）<input data-figure-field="zoom" data-figure-index="${index}" type="number" min="50" max="240" step="0.1" value="${zoom}" /></label></div><div class="figure-zoom-row"><label>图像上下位置（正数向下）<input class="figure-zoom-slider" data-figure-field="verticalOffset" data-figure-index="${index}" type="range" min="-220" max="220" step="1" value="${verticalOffset}" /></label><label class="figure-zoom-number">位置（px）<input data-figure-field="verticalOffset" data-figure-index="${index}" type="number" min="-220" max="220" step="1" value="${verticalOffset}" /></label></div><label>手动中心位置（%）<input class="figure-center-input" data-figure-centers data-figure-index="${index}" value="${manualText}" placeholder="开启手动校正后生成；可删改重填" /></label><small>缩放始终保持条带比例；上下位置只移动图像、不改变条带形状。手动模式中，删除黄线会同时排除对应条带和名称/数值。</small><small id="figureDetect-${index}">等待识别</small></div>`;
+    host.innerHTML = `<div class="figure-panel-card"><strong>图 ${index + 1} · ${escapeHtml(entry.name)}</strong><label>蛋白名称<input data-figure-field="protein" data-figure-index="${index}" value="${escapeHtml(entry.protein)}" placeholder="如：α-Tubulin" /></label><label>分子量（kDa）<input data-figure-field="mass" data-figure-index="${index}" value="${escapeHtml(entry.mass)}" placeholder="如：50" /></label>${perImageFields}<label>水平角度微调（°）<input data-figure-field="rotation" data-figure-index="${index}" type="number" min="-12" max="12" step="0.1" value="${escapeHtml(entry.rotation ?? 0)}" /></label><div class="figure-zoom-row"><label>手动缩放（自动排版为 100%）<input class="figure-zoom-slider" data-figure-field="zoom" data-figure-index="${index}" type="range" min="50" max="240" step="0.1" value="${zoom}" /></label><label class="figure-zoom-number">缩放（%）<input data-figure-field="zoom" data-figure-index="${index}" type="number" min="50" max="240" step="0.1" value="${zoom}" /></label></div><div class="figure-zoom-row"><label>手动上下微调（正数向下）<input class="figure-zoom-slider" data-figure-field="verticalOffset" data-figure-index="${index}" type="range" min="-220" max="220" step="1" value="${verticalOffset}" /></label><label class="figure-zoom-number">位置（px）<input data-figure-field="verticalOffset" data-figure-index="${index}" type="number" min="-220" max="220" step="1" value="${verticalOffset}" /></label></div><label>手动中心位置（%）<input class="figure-center-input" data-figure-centers data-figure-index="${index}" value="${manualText}" placeholder="开启手动校正后生成；可删改重填" /></label><small>默认先按全部保留条带自动紧凑裁剪、完整居中；增加或删除黄线会重新自动排版。之后如仍不满意，再使用缩放和上下位置微调。</small><small id="figureDetect-${index}">等待识别</small></div>`;
   }
 
   function updateFigureLaneScopeUi() {
@@ -3218,20 +3219,31 @@
     $('#figureGuideSelection').textContent = figure.selectedGuide
       ? `已选择：图 ${figure.selectedGuide.index + 1} · 泳道 ${figure.selectedGuide.centerIndex + 1}`
       : '尚未选择黄线';
-    $('#figureFrameSize').textContent = `黑框：${clamp(Math.round(number($('#figureFrameWidth').value, 840)), 260, 920)} × ${clamp(Math.round(number($('#figureFrameHeight').value, 78)), 32, 220)} px`;
+    const displayedFrame = figure.effectiveFrame || {
+      width: clamp(Math.round(number($('#figureFrameWidth').value, 840)), 140, 920),
+      height: clamp(Math.round(number($('#figureFrameHeight').value, 78)), 32, 220),
+    };
+    $('#figureFrameSize').textContent = `${$('#figureAutoFrame').checked ? '自动黑框' : '黑框'}：${displayedFrame.width} × ${displayedFrame.height} px`;
     $('#figureEditHint').textContent = figure.editing
       ? (figure.editTool === 'add'
         ? '增加模式：在黑框内需要的位置单击，新增黄线并同步增加名称项；完成后自动返回选择模式。'
         : '选择模式：单击黄线选中，拖动可移动；删除黄线会排除对应条带，并同步删除名称和数值。')
       : (figure.frameEditing
         ? '拖动黑框边缘或四角可统一改变全部黑框尺寸；尺寸数值会实时显示。图像始终等比缩放。'
-        : '手动模式中的黄线决定保留泳道；删除黄线会排除对应条带。缩放与上下位置可在每张图设置中调整。');
+        : '默认先自动紧凑框选全部主条带并完整居中；增删黄线后会重新裁剪、缩放和居中。不满意时再手动微调。');
   }
 
   function toggleFigureFrameEdit() {
     if (!figure.images.length) return toastMessage('请先上传 WB 图。');
     figure.frameEditing = !figure.frameEditing;
     if (figure.frameEditing) {
+      if ($('#figureAutoFrame').checked) {
+        $('#figureAutoFrame').checked = false;
+        if (figure.effectiveFrame) {
+          $('#figureFrameWidth').value = figure.effectiveFrame.width;
+          $('#figureFrameHeight').value = figure.effectiveFrame.height;
+        }
+      }
       figure.editing = false;
       figure.dragging = null;
       figure.selectedGuide = null;
@@ -3339,6 +3351,8 @@
     pushHistory('删除手动泳道线');
     const previousCount = entry.manualCenters.length;
     entry.manualCenters.splice(selected.centerIndex, 1);
+    entry.zoom = 100;
+    entry.verticalOffset = 0;
     syncFigureAnnotations('delete', selected.centerIndex, previousCount, selected.index);
     figure.selectedGuide = null;
     renderFigurePanelInputs();
@@ -3362,7 +3376,7 @@
         figure.frameResize = {
           handle,
           start: point,
-          width: clamp(Math.round(number($('#figureFrameWidth').value, 840)), 260, 920),
+          width: clamp(Math.round(number($('#figureFrameWidth').value, 840)), 140, 920),
           height: clamp(Math.round(number($('#figureFrameHeight').value, 78)), 32, 220),
         };
         figureCanvas.setPointerCapture(event.pointerId);
@@ -3379,6 +3393,8 @@
         const previousCount = entry.manualCenters.length;
         entry.manualCenters.push(normalized);
         entry.manualCenters.sort((a, b) => a - b);
+        entry.zoom = 100;
+        entry.verticalOffset = 0;
         const centerIndex = entry.manualCenters.findIndex(center => center === normalized);
         syncFigureAnnotations('insert', centerIndex, previousCount, layout.index);
         figure.selectedGuide = { index: layout.index, centerIndex };
@@ -3412,7 +3428,7 @@
         if (figure.frameResize.handle.includes('left')) nextWidth -= horizontalDelta * 2;
         if (figure.frameResize.handle.includes('bottom')) nextHeight += verticalDelta * 2;
         if (figure.frameResize.handle.includes('top')) nextHeight -= verticalDelta * 2;
-        $('#figureFrameWidth').value = clamp(Math.round(nextWidth), 260, 920);
+        $('#figureFrameWidth').value = clamp(Math.round(nextWidth), 140, 920);
         $('#figureFrameHeight').value = clamp(Math.round(nextHeight), 32, 220);
         renderWbFigure();
         return;
@@ -3619,59 +3635,67 @@
   function buildFigureStrip(entry, xCandidates, bandCandidates, padding, whiteBackground, rotationDegrees = 0, backgroundStrength = 62, preserveColor = true) {
     const sourceWidth = entry.image.naturalWidth || entry.image.width;
     const sourceHeight = entry.image.naturalHeight || entry.image.height;
-    // Manual yellow guides describe lane centres only. They must never become
-    // crop boundaries, otherwise dragging a guide changes crop width and makes
-    // the image appear stretched. Crop exclusively from measured band edges.
     const xSource = bandCandidates.length ? bandCandidates : xCandidates;
     const bandWidths = bandCandidates.map(candidate => candidate.width).filter(width => width > 0);
-    const horizontalPadding = Math.max(10, Math.round((percentile(bandWidths, 0.5) || sourceWidth * 0.04) * 0.45));
+    const bandHeights = bandCandidates.map(candidate => candidate.height).filter(height => height > 0);
+    // Keep only a small amount of membrane at both ends. Width-based padding
+    // made broad bands retain almost half a lane of blank background per side.
+    const typicalWidth = percentile(bandWidths, 0.5) || sourceWidth * 0.04;
+    const typicalHeight = percentile(bandHeights, 0.5) || sourceHeight * 0.04;
+    const horizontalPadding = clamp(Math.round(Math.min(typicalWidth * 0.14, typicalHeight * 0.55)), 4, 24);
     const x0 = xSource.length ? clamp(Math.floor(Math.min(...xSource.map(candidate => candidate.x)) - horizontalPadding), 0, sourceWidth - 2) : 0;
     const x1 = xSource.length ? clamp(Math.ceil(Math.max(...xSource.map(candidate => candidate.x + Math.max(candidate.width || 0, 1))) + horizontalPadding), x0 + 2, sourceWidth) : sourceWidth;
     const validBands = bandCandidates.filter(candidate => Number.isFinite(candidate.y) && Number.isFinite(candidate.height));
     const y0 = validBands.length ? clamp(Math.floor(Math.min(...validBands.map(candidate => candidate.y)) - padding), 0, sourceHeight - 2) : 0;
     const y1 = validBands.length ? clamp(Math.ceil(Math.max(...validBands.map(candidate => candidate.y + candidate.height)) + padding), y0 + 2, sourceHeight) : sourceHeight;
-    const cropWidth = Math.max(2, x1 - x0);
-    const cropHeight = Math.max(2, y1 - y0);
-    const rotatedCanvas = document.createElement('canvas');
-    rotatedCanvas.width = cropWidth;
-    rotatedCanvas.height = cropHeight;
-    const rotatedCtx = rotatedCanvas.getContext('2d', { willReadFrequently: true });
+    const sourceCropWidth = Math.max(2, x1 - x0);
+    const sourceCropHeight = Math.max(2, y1 - y0);
+    const angle = clamp(number(rotationDegrees, 0), -12, 12) * Math.PI / 180;
+    const cosine = Math.cos(angle);
+    const sine = Math.sin(angle);
+    // Rotate into an expanded canvas so deskewing never cuts the first/last
+    // lane. The strip is trimmed again from the transformed band boundaries.
+    const rotatedWidth = Math.max(2, Math.ceil(Math.abs(sourceCropWidth * cosine) + Math.abs(sourceCropHeight * sine)));
+    const rotatedHeight = Math.max(2, Math.ceil(Math.abs(sourceCropWidth * sine) + Math.abs(sourceCropHeight * cosine)));
     const backgroundSampleCanvas = document.createElement('canvas');
-    backgroundSampleCanvas.width = cropWidth;
-    backgroundSampleCanvas.height = cropHeight;
+    backgroundSampleCanvas.width = sourceCropWidth;
+    backgroundSampleCanvas.height = sourceCropHeight;
     const backgroundSampleCtx = backgroundSampleCanvas.getContext('2d', { willReadFrequently: true });
-    backgroundSampleCtx.drawImage(entry.image, x0, y0, cropWidth, cropHeight, 0, 0, cropWidth, cropHeight);
-    const backgroundPixels = backgroundSampleCtx.getImageData(0, 0, cropWidth, cropHeight).data;
-    const edgeDepth = clamp(Math.round(cropHeight * 0.18), 1, Math.max(1, Math.floor(cropHeight / 2)));
+    backgroundSampleCtx.drawImage(entry.image, x0, y0, sourceCropWidth, sourceCropHeight, 0, 0, sourceCropWidth, sourceCropHeight);
+    const backgroundPixels = backgroundSampleCtx.getImageData(0, 0, sourceCropWidth, sourceCropHeight).data;
+    const edgeDepth = clamp(Math.round(sourceCropHeight * 0.18), 1, Math.max(1, Math.floor(sourceCropHeight / 2)));
     const red = [];
     const green = [];
     const blue = [];
-    const sampleStep = Math.max(1, Math.floor(cropWidth / 240));
-    for (let y = 0; y < cropHeight; y += 1) {
-      if (y >= edgeDepth && y < cropHeight - edgeDepth) continue;
-      for (let x = 0; x < cropWidth; x += sampleStep) {
-        const offset = (y * cropWidth + x) * 4;
+    const sampleStep = Math.max(1, Math.floor(sourceCropWidth / 240));
+    for (let y = 0; y < sourceCropHeight; y += 1) {
+      if (y >= edgeDepth && y < sourceCropHeight - edgeDepth) continue;
+      for (let x = 0; x < sourceCropWidth; x += sampleStep) {
+        const offset = (y * sourceCropWidth + x) * 4;
         red.push(backgroundPixels[offset]);
         green.push(backgroundPixels[offset + 1]);
         blue.push(backgroundPixels[offset + 2]);
       }
     }
     const originalBackground = `rgb(${Math.round(percentile(red, 0.5) || 208)}, ${Math.round(percentile(green, 0.5) || 208)}, ${Math.round(percentile(blue, 0.5) || 208)})`;
+    const rotatedCanvas = document.createElement('canvas');
+    rotatedCanvas.width = rotatedWidth;
+    rotatedCanvas.height = rotatedHeight;
+    const rotatedCtx = rotatedCanvas.getContext('2d', { willReadFrequently: true });
     rotatedCtx.fillStyle = whiteBackground ? '#ffffff' : originalBackground;
-    rotatedCtx.fillRect(0, 0, cropWidth, cropHeight);
-    const angle = clamp(number(rotationDegrees, 0), -12, 12) * Math.PI / 180;
+    rotatedCtx.fillRect(0, 0, rotatedWidth, rotatedHeight);
     rotatedCtx.save();
-    rotatedCtx.translate(cropWidth / 2, cropHeight / 2);
+    rotatedCtx.translate(rotatedWidth / 2, rotatedHeight / 2);
     rotatedCtx.rotate(angle);
-    rotatedCtx.drawImage(entry.image, x0, y0, cropWidth, cropHeight, -cropWidth / 2, -cropHeight / 2, cropWidth, cropHeight);
+    rotatedCtx.drawImage(entry.image, x0, y0, sourceCropWidth, sourceCropHeight, -sourceCropWidth / 2, -sourceCropHeight / 2, sourceCropWidth, sourceCropHeight);
     rotatedCtx.restore();
 
     const transformPoint = (sourceX, sourceY) => {
-      const localX = sourceX - x0 - cropWidth / 2;
-      const localY = sourceY - y0 - cropHeight / 2;
+      const localX = sourceX - x0 - sourceCropWidth / 2;
+      const localY = sourceY - y0 - sourceCropHeight / 2;
       return {
-        x: Math.cos(angle) * localX - Math.sin(angle) * localY + cropWidth / 2,
-        y: Math.sin(angle) * localX + Math.cos(angle) * localY + cropHeight / 2,
+        x: cosine * localX - sine * localY + rotatedWidth / 2,
+        y: sine * localX + cosine * localY + rotatedHeight / 2,
       };
     };
     const templateWidth = percentile(bandWidths, 0.5) || Math.max(8, sourceWidth * 0.045);
@@ -3699,14 +3723,17 @@
       const bottom = candidate.y + candidate.height;
       return [transformPoint(left, top), transformPoint(right, top), transformPoint(left, bottom), transformPoint(right, bottom)];
     });
-    const trimY0 = transformedBands.length ? clamp(Math.floor(Math.min(...transformedBands.map(point => point.y)) - padding), 0, cropHeight - 2) : 0;
-    const trimY1 = transformedBands.length ? clamp(Math.ceil(Math.max(...transformedBands.map(point => point.y)) + padding), trimY0 + 2, cropHeight) : cropHeight;
+    const trimX0 = transformedBands.length ? clamp(Math.floor(Math.min(...transformedBands.map(point => point.x)) - horizontalPadding), 0, rotatedWidth - 2) : 0;
+    const trimX1 = transformedBands.length ? clamp(Math.ceil(Math.max(...transformedBands.map(point => point.x)) + horizontalPadding), trimX0 + 2, rotatedWidth) : rotatedWidth;
+    const trimY0 = transformedBands.length ? clamp(Math.floor(Math.min(...transformedBands.map(point => point.y)) - padding), 0, rotatedHeight - 2) : 0;
+    const trimY1 = transformedBands.length ? clamp(Math.ceil(Math.max(...transformedBands.map(point => point.y)) + padding), trimY0 + 2, rotatedHeight) : rotatedHeight;
+    const finalWidth = Math.max(2, trimX1 - trimX0);
     const finalHeight = Math.max(2, trimY1 - trimY0);
     const stripCanvas = document.createElement('canvas');
-    stripCanvas.width = cropWidth;
+    stripCanvas.width = finalWidth;
     stripCanvas.height = finalHeight;
     const stripCtx = stripCanvas.getContext('2d', { willReadFrequently: true });
-    stripCtx.drawImage(rotatedCanvas, 0, trimY0, cropWidth, finalHeight, 0, 0, cropWidth, finalHeight);
+    stripCtx.drawImage(rotatedCanvas, trimX0, trimY0, finalWidth, finalHeight, 0, 0, finalWidth, finalHeight);
     const bandRegions = preservationBands.map(candidate => {
       const corners = [
         transformPoint(candidate.x, candidate.y),
@@ -3714,23 +3741,23 @@
         transformPoint(candidate.x, candidate.y + candidate.height),
         transformPoint(candidate.x + candidate.width, candidate.y + candidate.height),
       ];
-      const left = Math.min(...corners.map(point => point.x));
-      const right = Math.max(...corners.map(point => point.x));
+      const left = Math.min(...corners.map(point => point.x)) - trimX0;
+      const right = Math.max(...corners.map(point => point.x)) - trimX0;
       const top = Math.min(...corners.map(point => point.y)) - trimY0;
       const bottom = Math.max(...corners.map(point => point.y)) - trimY0;
       return { x: left, y: top, width: Math.max(1, right - left), height: Math.max(1, bottom - top) };
     });
-    if (whiteBackground) whitenFigureBackground(stripCtx, cropWidth, finalHeight, backgroundStrength, preserveColor, bandRegions);
+    if (whiteBackground) whitenFigureBackground(stripCtx, finalWidth, finalHeight, backgroundStrength, preserveColor, bandRegions);
     return {
       canvas: stripCanvas,
       x0,
       y0,
-      cropWidth,
+      cropWidth: finalWidth,
       cropHeight: finalHeight,
       rotationDegrees: angle * 180 / Math.PI,
       mapSourcePoint: (sourceX, sourceY) => {
         const point = transformPoint(sourceX, sourceY);
-        return { x: point.x, y: point.y - trimY0 };
+        return { x: point.x - trimX0, y: point.y - trimY0 };
       },
     };
   }
@@ -3789,15 +3816,16 @@
     frameCtx.imageSmoothingEnabled = true;
     frameCtx.imageSmoothingQuality = 'high';
     frameCtx.drawImage(backgroundLine, 0, 0, width, height);
-    // 100% means an aspect-preserving "cover": the detected strip fills the
-    // black frame without side blanks. Overflow is clipped, never stretched.
-    // Users can zoom below 100% when they intentionally want more background.
-    const coverScale = Math.max(width / Math.max(1, stripCanvas.width), height / Math.max(1, stripCanvas.height));
-    const scale = coverScale * clamp(number(zoomPercent, 100), 50, 240) / 100;
-    const drawWidth = stripCanvas.width * scale;
-    const drawHeight = stripCanvas.height * scale;
-    const offsetX = (width - drawWidth) / 2;
-    const offsetY = (height - drawHeight) / 2 + clamp(number(verticalOffset, 0), -220, 220);
+    // Automatic 100% placement always contains the complete selected strip.
+    // It leaves only a small frame inset and centers the band row. Higher zoom
+    // values are an explicit manual override and may intentionally clip.
+    const placement = core.figureFramePlacement(stripCanvas.width, stripCanvas.height, width, height, {
+      insetX: clamp(Math.round(width * 0.012), 6, 12),
+      insetY: clamp(Math.round(height * 0.07), 3, 8),
+      zoomPercent,
+      verticalOffset,
+    });
+    const { scale, offsetX, offsetY, drawWidth, drawHeight } = placement;
     frameCtx.save();
     frameCtx.beginPath(); frameCtx.rect(0, 0, width, height); frameCtx.clip();
     frameCtx.imageSmoothingEnabled = true;
@@ -3891,11 +3919,10 @@
     const backgroundStrength = clamp(Math.round(number($('#figureBackgroundStrength').value, 62)), 0, 100);
     const { proteinFontSize, massFontSize, valueFontSize, laneFontSize } = figureTypography();
     const panelGap = clamp(Math.round(number($('#figurePanelGap').value, 18)), 4, 100);
-    const frameWidth = clamp(Math.round(number($('#figureFrameWidth').value, 840)), 260, 920);
+    const maximumFrameWidth = clamp(Math.round(number($('#figureFrameWidth').value, 840)), 140, 920);
     const frameHeight = clamp(Math.round(number($('#figureFrameHeight').value, 78)), 32, 220);
-    const frame = { x: Math.round((1200 - frameWidth) / 2), width: frameWidth, height: frameHeight };
     const perImageAnnotations = $('#figureLaneScope').value === 'per-image';
-    const preparedPanels = figure.images.map((entry, index) => {
+    const rawPanels = figure.images.map((entry, index) => {
       const annotations = figureAnnotationValues(entry);
       const sourceWidth = entry.image.naturalWidth || entry.image.width;
       const sourceHeight = entry.image.naturalHeight || entry.image.height;
@@ -3908,6 +3935,21 @@
       const autoAngle = autoDeskew ? bandLine.angle : 0;
       const totalAngle = autoAngle + clamp(number(entry.rotation, 0), -12, 12);
       const strip = buildFigureStrip(entry, candidates, candidates, cropPadding, whiteBackground, totalAngle, backgroundStrength, preserveColor);
+      return { entry, index, annotations, sourceWidth, expectedCount, automaticCandidates, bandLine, candidates, totalAngle, strip };
+    });
+    const autoFrame = $('#figureAutoFrame').checked;
+    const automaticFrameWidth = rawPanels.reduce((maximum, panel) => {
+      const usableHeight = Math.max(1, frameHeight - clamp(Math.round(frameHeight * 0.14), 6, 16));
+      const idealWidth = panel.strip.canvas.width / Math.max(1, panel.strip.canvas.height) * usableHeight + 16;
+      return Math.max(maximum, idealWidth);
+    }, 140);
+    const frameWidth = autoFrame
+      ? clamp(Math.round(automaticFrameWidth), 140, maximumFrameWidth)
+      : maximumFrameWidth;
+    const frame = { x: Math.round((1200 - frameWidth) / 2), width: frameWidth, height: frameHeight };
+    figure.effectiveFrame = { width: frameWidth, height: frameHeight };
+    const preparedPanels = rawPanels.map(panel => {
+      const { entry, index, annotations, sourceWidth, expectedCount, automaticCandidates, bandLine, candidates, totalAngle, strip } = panel;
       const composed = composeFigureFrame(strip.canvas, frame.width, frame.height, entry.zoom, entry.verticalOffset);
       const laneXs = candidates.map(candidate => {
         const sourceX = candidate.x + candidate.width / 2;
@@ -3916,16 +3958,7 @@
       });
       const laneLabelMetrics = figureLaneLabelMetrics(laneXs, annotations.names, laneFontSize);
       return {
-        entry,
-        index,
-        annotations,
-        sourceWidth,
-        expectedCount,
-        automaticCandidates,
-        bandLine,
-        candidates,
-        totalAngle,
-        strip,
+        ...panel,
         composed,
         laneXs,
         laneLabelMetrics,
@@ -4243,7 +4276,7 @@
     'roiType', 'roiName', 'roiGroup', 'pairAutoBackground', 'pairSensitivity', 'pairLaneCount', 'pairMarkerPercent', 'pairEdgePadding', 'pairDefaultLoadVolume', 'pairAllowSaturatedCalibration',
     'figureLaneScope', 'figureLaneNames', 'figureValues', 'figureLaneCount', 'figureMarkerPercent', 'figureProteinFontSize', 'figureMassFontSize', 'figureValueFontSize', 'figureLaneFontSize',
     'figureCropPadding', 'figureBackgroundStrength', 'figureWhiteBackground', 'figurePreserveColor', 'figureAutoDeskew', 'figureShowValues',
-    'figureCompositionMode', 'figureValuePosition', 'figureLanePosition', 'figureProteinSide', 'figureMassSide', 'figurePanelGap', 'figureFrameWidth', 'figureFrameHeight',
+    'figureCompositionMode', 'figureValuePosition', 'figureLanePosition', 'figureProteinSide', 'figureMassSide', 'figurePanelGap', 'figureAutoFrame', 'figureFrameWidth', 'figureFrameHeight',
     'figureGroupLabels', 'figureTemplate', 'figureCustomWidthMm', 'figureDpi', 'figurePanelLetters',
   ];
 
@@ -4682,8 +4715,8 @@
     $('#addFigureGuide').addEventListener('click', () => setFigureEditTool('add'));
     $('#deleteFigureGuide').addEventListener('click', deleteSelectedFigureGuide);
     $('#clearFigureManual').addEventListener('click', clearFigureManualEdit);
-    ['figureLaneScope', 'figureLaneNames', 'figureValues', 'figureLaneCount', 'figureProteinFontSize', 'figureMassFontSize', 'figureValueFontSize', 'figureLaneFontSize', 'figureCropPadding', 'figureBackgroundStrength', 'figureFrameWidth', 'figureFrameHeight', 'figurePanelGap', 'figureShowValues', 'figureWhiteBackground', 'figurePreserveColor', 'figureAutoDeskew', 'figureCompositionMode', 'figureValuePosition', 'figureLanePosition', 'figureProteinSide', 'figureMassSide', 'figureGroupLabels', 'figureTemplate', 'figureCustomWidthMm', 'figureDpi', 'figurePanelLetters'].forEach(id => {
-      const changeOnly = ['figureLaneScope', 'figureShowValues', 'figureWhiteBackground', 'figurePreserveColor', 'figureAutoDeskew', 'figureCompositionMode', 'figureValuePosition', 'figureLanePosition', 'figureProteinSide', 'figureMassSide', 'figureTemplate'].includes(id);
+    ['figureLaneScope', 'figureLaneNames', 'figureValues', 'figureLaneCount', 'figureProteinFontSize', 'figureMassFontSize', 'figureValueFontSize', 'figureLaneFontSize', 'figureCropPadding', 'figureBackgroundStrength', 'figureAutoFrame', 'figureFrameWidth', 'figureFrameHeight', 'figurePanelGap', 'figureShowValues', 'figureWhiteBackground', 'figurePreserveColor', 'figureAutoDeskew', 'figureCompositionMode', 'figureValuePosition', 'figureLanePosition', 'figureProteinSide', 'figureMassSide', 'figureGroupLabels', 'figureTemplate', 'figureCustomWidthMm', 'figureDpi', 'figurePanelLetters'].forEach(id => {
+      const changeOnly = ['figureLaneScope', 'figureShowValues', 'figureWhiteBackground', 'figurePreserveColor', 'figureAutoDeskew', 'figureAutoFrame', 'figureCompositionMode', 'figureValuePosition', 'figureLanePosition', 'figureProteinSide', 'figureMassSide', 'figureTemplate'].includes(id);
       $(`#${id}`).addEventListener(changeOnly ? 'change' : 'input', () => {
         if (id === 'figureWhiteBackground') {
           const enabled = $('#figureWhiteBackground').checked;
@@ -4743,8 +4776,13 @@
         .map(value => number(value, NaN) / 100)
         .filter(value => Number.isFinite(value) && value >= 0 && value <= 1)
         .sort((a, b) => a - b);
+      const previousCount = entry.manualCenters?.length || 0;
       if (centers.length) entry.manualCenters = centers;
       else delete entry.manualCenters;
+      if (centers.length !== previousCount) {
+        entry.zoom = 100;
+        entry.verticalOffset = 0;
+      }
       figure.editing = figure.images.some(item => item.manualCenters?.length);
       renderFigurePanelInputs();
       renderWbFigure();

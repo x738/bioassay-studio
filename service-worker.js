@@ -1,10 +1,10 @@
-const CACHE_NAME = 'bioassay-studio-v2.5.1-r39';
+const CACHE_NAME = 'bioassay-studio-v2.5.1-r42';
 const APP_SHELL = [
   './',
   './index.html',
   './styles.css?v=2.5.1-r39',
-  './analysis-core.js?v=2.5.1-r3',
-  './app.js?v=2.5.1-r39',
+  './analysis-core.js?v=2.5.1-r4',
+  './app.js?v=2.5.1-r42',
   './privacy.html',
   './manifest.webmanifest',
   './icon.svg',

@@ -292,8 +292,9 @@
               </div>
               <div class="figure-crop-grid">
                 <label>条带上下留白（px）<input id="figureCropPadding" type="number" min="2" max="80" value="12" /></label>
+                <label class="checkbox-row"><input id="figureAutoFrame" type="checkbox" checked />自动按保留条带紧凑调整黑框</label>
                 <div class="figure-frame-size-grid">
-                  <label>黑框宽度（px）<input id="figureFrameWidth" type="number" min="260" max="920" value="840" /></label>
+                  <label>黑框宽度 / 自动最大宽度（px）<input id="figureFrameWidth" type="number" min="140" max="920" value="840" /></label>
                   <label>黑框高度（px）<input id="figureFrameHeight" type="number" min="32" max="220" value="78" /></label>
                 </div>
                 <label>去背景强度（0–100）<input id="figureBackgroundStrength" type="number" min="0" max="100" value="62" disabled /></label>
@@ -325,7 +326,7 @@
                 <button id="toggleFigureFrame" class="button button-ghost" type="button">调整黑框大小</button>
                 <span id="figureFrameSize" class="figure-guide-selection">黑框：840 × 78 px</span>
               </div>
-              <p id="figureEditHint" class="figure-edit-hint">手动模式中的黄线决定保留泳道；删除黄线会排除对应条带。缩放与上下位置可在每张图设置中调整。</p>
+        <p id="figureEditHint" class="figure-edit-hint">默认先自动紧凑框选全部主条带并居中；删除黄线后会重新裁剪和排版。不满意时再使用手动缩放、上下位置或黑框调整。</p>
               <p id="figureStatus" class="figure-status">上传一张或多张 WB 图后开始排版。每张图的黑框尺寸固定一致。</p>
             </aside>
 
@@ -361,10 +362,10 @@
     </dialog>
 
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
-    <script src="analysis-core.js?v=2.5.1-r3"></script>
+  <script src="analysis-core.js?v=2.5.1-r4"></script>
     <script src="vendor/xlsx.full.min.js"></script>
     <script src="vendor/chart.umd.js"></script>
     <script src="vendor/UTIF.js"></script>
-    <script src="app.js?v=2.5.1-r39"></script>
+  <script src="app.js?v=2.5.1-r42"></script>
   </body>
 </html>

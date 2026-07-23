@@ -302,6 +302,30 @@
     return Number(canvasWidth) * 25.4 / (Number(millimeters) * 72);
   }
 
+  function figureFramePlacement(sourceWidth, sourceHeight, frameWidth, frameHeight, options = {}) {
+    if (![sourceWidth, sourceHeight, frameWidth, frameHeight].every(finitePositive)) {
+      return { scale: 0, offsetX: 0, offsetY: 0, drawWidth: 0, drawHeight: 0 };
+    }
+    const width = Number(frameWidth);
+    const height = Number(frameHeight);
+    const insetX = Math.max(0, Math.min(width / 3, Number(options.insetX) || 0));
+    const insetY = Math.max(0, Math.min(height / 3, Number(options.insetY) || 0));
+    const availableWidth = Math.max(1, width - insetX * 2);
+    const availableHeight = Math.max(1, height - insetY * 2);
+    const fitScale = Math.min(availableWidth / Number(sourceWidth), availableHeight / Number(sourceHeight));
+    const zoom = Math.max(0.5, Math.min(2.4, (Number(options.zoomPercent) || 100) / 100));
+    const scale = fitScale * zoom;
+    const drawWidth = Number(sourceWidth) * scale;
+    const drawHeight = Number(sourceHeight) * scale;
+    return {
+      scale,
+      offsetX: (width - drawWidth) / 2,
+      offsetY: (height - drawHeight) / 2 + Math.max(-220, Math.min(220, Number(options.verticalOffset) || 0)),
+      drawWidth,
+      drawHeight,
+    };
+  }
+
   function readUint32(bytes, offset) {
     return (((bytes[offset] << 24) >>> 0) + (bytes[offset + 1] << 16) + (bytes[offset + 2] << 8) + bytes[offset + 3]) >>> 0;
   }
@@ -408,6 +432,7 @@
     dpiToPixelsPerMeter,
     editLaneAnnotations,
     filterBandGeometryOutliers,
+    figureFramePlacement,
     pixelsForPhysicalWidth,
     readPngDpi,
     refineSignalBounds,
