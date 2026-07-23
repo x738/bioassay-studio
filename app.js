@@ -35,6 +35,7 @@
     backgroundMode: 'global',
     drawing: null,
     dragging: null,
+    resizing: null,
     tempROI: null,
     nextId: 1,
     profileRoiId: '',
@@ -823,6 +824,78 @@
     ctx.restore();
   }
 
+  const wbResizeHandleDefinitions = [
+    { key: 'nw', x: 0, y: 0, cursor: 'nwse-resize' },
+    { key: 'n', x: 0.5, y: 0, cursor: 'ns-resize' },
+    { key: 'ne', x: 1, y: 0, cursor: 'nesw-resize' },
+    { key: 'e', x: 1, y: 0.5, cursor: 'ew-resize' },
+    { key: 'se', x: 1, y: 1, cursor: 'nwse-resize' },
+    { key: 's', x: 0.5, y: 1, cursor: 'ns-resize' },
+    { key: 'sw', x: 0, y: 1, cursor: 'nesw-resize' },
+    { key: 'w', x: 0, y: 0.5, cursor: 'ew-resize' },
+  ];
+
+  function wbImagePixelsForCss(cssPixels) {
+    const focused = wb.viewMode === 'focus' && wb.viewBounds;
+    const sourceWidth = focused ? wb.viewBounds.width : canvas.width;
+    const sourceHeight = focused ? wb.viewBounds.height : canvas.height;
+    const displayRect = focused ? wbViewport.getBoundingClientRect() : canvas.getBoundingClientRect();
+    const scaleX = sourceWidth / Math.max(1, displayRect.width);
+    const scaleY = sourceHeight / Math.max(1, displayRect.height);
+    return Math.max(1, cssPixels * Math.max(scaleX, scaleY));
+  }
+
+  function wbResizeHandles(roi) {
+    return wbResizeHandleDefinitions.map(handle => ({
+      ...handle,
+      x: roi.x + roi.width * handle.x,
+      y: roi.y + roi.height * handle.y,
+    }));
+  }
+
+  function wbResizeHandleAt(point, roi) {
+    if (!roi) return null;
+    const radius = wbImagePixelsForCss(9);
+    return wbResizeHandles(roi)
+      .map(handle => ({ ...handle, distance: Math.hypot(point.x - handle.x, point.y - handle.y) }))
+      .filter(handle => handle.distance <= radius)
+      .sort((left, right) => left.distance - right.distance)[0] || null;
+  }
+
+  function drawWbResizeHandles(roi) {
+    const size = wbImagePixelsForCss(10);
+    ctx.save();
+    ctx.lineWidth = Math.max(1, wbImagePixelsForCss(1.5));
+    ctx.strokeStyle = '#0a4f7a';
+    ctx.fillStyle = '#ffffff';
+    wbResizeHandles(roi).forEach(handle => {
+      ctx.fillRect(handle.x - size / 2, handle.y - size / 2, size, size);
+      ctx.strokeRect(handle.x - size / 2, handle.y - size / 2, size, size);
+    });
+    ctx.restore();
+  }
+
+  function resizeWbRoi(roi, resizeState, point) {
+    const minimumSize = Math.max(3, Math.round(wbImagePixelsForCss(4)));
+    const dx = point.x - resizeState.start.x;
+    const dy = point.y - resizeState.start.y;
+    let left = resizeState.original.x;
+    let top = resizeState.original.y;
+    let right = resizeState.original.x + resizeState.original.width;
+    let bottom = resizeState.original.y + resizeState.original.height;
+    if (resizeState.handle.includes('w')) left = clamp(resizeState.original.x + dx, 0, right - minimumSize);
+    if (resizeState.handle.includes('e')) right = clamp(resizeState.original.x + resizeState.original.width + dx, left + minimumSize, canvas.width);
+    if (resizeState.handle.includes('n')) top = clamp(resizeState.original.y + dy, 0, bottom - minimumSize);
+    if (resizeState.handle.includes('s')) bottom = clamp(resizeState.original.y + resizeState.original.height + dy, top + minimumSize, canvas.height);
+    roi.x = Math.round(left);
+    roi.y = Math.round(top);
+    roi.width = Math.max(1, Math.round(right - left));
+    roi.height = Math.max(1, Math.round(bottom - top));
+    roi.auto = false;
+    roi.manualAdjusted = true;
+    delete roi.confidence;
+  }
+
   function drawWb() {
     if (!wb.image) { canvas.width = 0; canvas.height = 0; applyWbViewport(); return; }
     ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -836,6 +909,7 @@
       ctx.setLineDash([]);
       ctx.strokeRect(selected.x - 2, selected.y - 2, selected.width + 4, selected.height + 4);
       ctx.restore();
+      drawWbResizeHandles(selected);
     }
     if (wb.tempROI) drawRoi(wb.tempROI, wb.tempROI.type, wb.tempROI.name, true);
     applyWbViewport();
@@ -2695,7 +2769,7 @@
 
   function clearWb() {
     pushHistory('清空 WB 工作区');
-    wb.image = null; wb.fileName = ''; wb.imageCtx = null; wb.source = null; wb.rois = []; wb.referenceId = ''; wb.profileRoiId = ''; wb.selectedId = ''; wb.drawing = null; wb.tempROI = null; wb.viewBounds = null; wb.viewMode = 'full'; wb.viewAngle = 0;
+    wb.image = null; wb.fileName = ''; wb.imageCtx = null; wb.source = null; wb.rois = []; wb.referenceId = ''; wb.profileRoiId = ''; wb.selectedId = ''; wb.drawing = null; wb.dragging = null; wb.resizing = null; wb.tempROI = null; wb.viewBounds = null; wb.viewMode = 'full'; wb.viewAngle = 0;
     canvas.width = 0; canvas.height = 0;
     $('#wbImageInput').value = '';
     $('#wbEmptyState').classList.remove('hide');
@@ -3071,11 +3145,11 @@
     const index = figure.selectedImageIndex;
     const entry = figure.images[index];
     const manualText = entry.manualCenters?.map(center => (center * 100).toFixed(1)).join(', ') || '';
-    const zoom = clamp(Math.round(number(entry.zoom, 100)), 50, 240);
+    const zoom = clamp(Math.round(number(entry.zoom, 100) * 10) / 10, 50, 240);
     const perImageFields = $('#figureLaneScope').value === 'per-image'
       ? `<label>本图泳道名称（左→右）<textarea data-figure-field="laneNames" data-figure-index="${index}" rows="5" placeholder="Control, Model, Treatment…">${escapeHtml(entry.laneNames || '')}</textarea></label><label>本图归一化数值<textarea data-figure-field="values" data-figure-index="${index}" rows="4" placeholder="1.00, 0.76, 0.95…">${escapeHtml(entry.values || '')}</textarea></label>`
       : '<small>当前为“整组共用”，泳道名称和数值请在左侧全局标注中填写。</small>';
-    host.innerHTML = `<div class="figure-panel-card"><strong>图 ${index + 1} · ${escapeHtml(entry.name)}</strong><label>蛋白名称<input data-figure-field="protein" data-figure-index="${index}" value="${escapeHtml(entry.protein)}" placeholder="如：α-Tubulin" /></label><label>分子量（kDa）<input data-figure-field="mass" data-figure-index="${index}" value="${escapeHtml(entry.mass)}" placeholder="如：50" /></label>${perImageFields}<label>水平角度微调（°）<input data-figure-field="rotation" data-figure-index="${index}" type="number" min="-12" max="12" step="0.1" value="${escapeHtml(entry.rotation ?? 0)}" /></label><div class="figure-zoom-row"><label>图像缩放（等比）<input data-figure-field="zoom" data-figure-index="${index}" type="range" min="50" max="240" step="1" value="${zoom}" /></label><output>${zoom}%</output></div><label>手动中心位置（%）<input class="figure-center-input" data-figure-centers data-figure-index="${index}" value="${manualText}" placeholder="开启手动校正后生成；可删改重填" /></label><small>黄线只定位泳道，不改变裁剪或图像比例。角度和缩放均独立调整。</small><small id="figureDetect-${index}">等待识别</small></div>`;
+    host.innerHTML = `<div class="figure-panel-card"><strong>图 ${index + 1} · ${escapeHtml(entry.name)}</strong><label>蛋白名称<input data-figure-field="protein" data-figure-index="${index}" value="${escapeHtml(entry.protein)}" placeholder="如：α-Tubulin" /></label><label>分子量（kDa）<input data-figure-field="mass" data-figure-index="${index}" value="${escapeHtml(entry.mass)}" placeholder="如：50" /></label>${perImageFields}<label>水平角度微调（°）<input data-figure-field="rotation" data-figure-index="${index}" type="number" min="-12" max="12" step="0.1" value="${escapeHtml(entry.rotation ?? 0)}" /></label><div class="figure-zoom-row"><label>图像缩放（等比）<input class="figure-zoom-slider" data-figure-field="zoom" data-figure-index="${index}" type="range" min="50" max="240" step="0.1" value="${zoom}" /></label><label class="figure-zoom-number">缩放（%）<input data-figure-field="zoom" data-figure-index="${index}" type="number" min="50" max="240" step="0.1" value="${zoom}" /></label></div><label>手动中心位置（%）<input class="figure-center-input" data-figure-centers data-figure-index="${index}" value="${manualText}" placeholder="开启手动校正后生成；可删改重填" /></label><small>可拖动滑块或直接输入 50–240% 的精确缩放值；始终等比缩放，不改变条带形状。黄线只定位泳道。</small><small id="figureDetect-${index}">等待识别</small></div>`;
   }
 
   function updateFigureLaneScopeUi() {
@@ -4310,6 +4384,11 @@
       if (before !== wb.rois.filter(roi => !roi.auto).length) pushHistory('清除自动 ROI');
       wb.rois = wb.rois.filter(roi => !roi.auto);
       if (wb.referenceId && !wb.rois.some(roi => roi.id === wb.referenceId)) wb.referenceId = '';
+      if (wb.profileRoiId && !wb.rois.some(roi => roi.id === wb.profileRoiId)) wb.profileRoiId = '';
+      if (wb.selectedId && !wb.rois.some(roi => roi.id === wb.selectedId)) wb.selectedId = '';
+      wb.dragging = null;
+      wb.resizing = null;
+      wb.viewMode = 'full';
       $('#autoDetectionNote').textContent = before === wb.rois.length ? '当前没有自动生成的 ROI。' : '已清除自动识别结果，保留手动 ROI。';
       updateWb();
     });
@@ -4327,12 +4406,26 @@
     canvas.addEventListener('pointerdown', event => {
       if (!wb.image) return;
       const point = canvasPoint(event);
+      const selected = wb.rois.find(roi => roi.id === wb.selectedId);
+      const resizeHandle = !event.shiftKey ? wbResizeHandleAt(point, selected) : null;
       const hit = [...wb.rois].reverse().find(roi => point.x >= roi.x && point.x <= roi.x + roi.width && point.y >= roi.y && point.y <= roi.y + roi.height);
       canvas.setPointerCapture(event.pointerId);
+      if (selected && resizeHandle) {
+        pushHistory('调整 ROI 大小');
+        wb.resizing = {
+          id: selected.id,
+          handle: resizeHandle.key,
+          start: point,
+          original: { x: selected.x, y: selected.y, width: selected.width, height: selected.height },
+        };
+        canvas.style.cursor = resizeHandle.cursor;
+        return;
+      }
       if (hit && !event.shiftKey) {
         pushHistory('拖动 ROI');
         wb.selectedId = hit.id;
         wb.dragging = { start: point, originalX: hit.x, originalY: hit.y };
+        canvas.style.cursor = 'move';
         drawWb();
         return;
       }
@@ -4343,6 +4436,13 @@
     });
     canvas.addEventListener('pointermove', event => {
       const point = canvasPoint(event);
+      if (wb.resizing) {
+        const roi = wb.rois.find(item => item.id === wb.resizing.id);
+        if (!roi) return;
+        resizeWbRoi(roi, wb.resizing, point);
+        drawWb();
+        return;
+      }
       if (wb.dragging) {
         const roi = wb.rois.find(item => item.id === wb.selectedId);
         if (!roi) return;
@@ -4352,14 +4452,29 @@
         drawWb();
         return;
       }
-      if (!wb.drawing) return;
-      wb.tempROI = { ...normalizedRect(wb.drawing, point), type: $('#roiType').value, name: $('#roiName').value.trim() || 'ROI' };
-      drawWb();
+      if (wb.drawing) {
+        wb.tempROI = { ...normalizedRect(wb.drawing, point), type: $('#roiType').value, name: $('#roiName').value.trim() || 'ROI' };
+        drawWb();
+        return;
+      }
+      const selected = wb.rois.find(roi => roi.id === wb.selectedId);
+      const resizeHandle = wbResizeHandleAt(point, selected);
+      const hit = [...wb.rois].reverse().find(roi => point.x >= roi.x && point.x <= roi.x + roi.width && point.y >= roi.y && point.y <= roi.y + roi.height);
+      canvas.style.cursor = resizeHandle?.cursor || (hit ? 'move' : 'crosshair');
     });
     const finishDrawing = event => {
+      if (wb.resizing) {
+        const { id, handle } = wb.resizing;
+        wb.resizing = null;
+        canvas.style.cursor = 'crosshair';
+        updateWb();
+        recordAudit('wb-roi-resized', { id, handle });
+        return;
+      }
       if (wb.dragging) {
         const id = wb.selectedId;
         wb.dragging = null;
+        canvas.style.cursor = 'crosshair';
         updateWb();
         recordAudit('wb-roi-moved', { id });
         return;
@@ -4369,7 +4484,10 @@
       wb.drawing = null; wb.tempROI = null; addRoi(rect);
     };
     canvas.addEventListener('pointerup', finishDrawing);
-    canvas.addEventListener('pointercancel', () => { wb.drawing = null; wb.dragging = null; wb.tempROI = null; drawWb(); });
+    canvas.addEventListener('pointerleave', () => {
+      if (!wb.drawing && !wb.dragging && !wb.resizing) canvas.style.cursor = 'crosshair';
+    });
+    canvas.addEventListener('pointercancel', () => { wb.drawing = null; wb.dragging = null; wb.resizing = null; wb.tempROI = null; canvas.style.cursor = 'crosshair'; drawWb(); });
     $('#wbDropzone').addEventListener('keydown', event => {
       if (!wb.selectedId) return;
       const step = event.shiftKey ? 10 : 1;
@@ -4433,11 +4551,29 @@
       const index = Number(event.target.dataset.figureIndex);
       const field = event.target.dataset.figureField;
       if (!Number.isInteger(index) || !field || !figure.images[index]) return;
-      figure.images[index][field] = event.target.value;
-      if (field === 'zoom') event.target.closest('.figure-zoom-row')?.querySelector('output')?.replaceChildren(`${Math.round(number(event.target.value, 100))}%`);
+      if (field === 'zoom') {
+        if (event.target.value === '') return;
+        const zoom = clamp(Math.round(number(event.target.value, figure.images[index].zoom || 100) * 10) / 10, 50, 240);
+        figure.images[index].zoom = zoom;
+        event.target.closest('.figure-zoom-row')?.querySelectorAll('[data-figure-field="zoom"]').forEach(control => {
+          if (control !== event.target) control.value = zoom;
+        });
+      } else {
+        figure.images[index][field] = event.target.value;
+      }
       renderWbFigure();
     });
     $('#figurePanelInputs').addEventListener('change', event => {
+      if (event.target.dataset.figureField === 'zoom') {
+        const index = Number(event.target.dataset.figureIndex);
+        const entry = figure.images[index];
+        if (!entry) return;
+        const zoom = clamp(Math.round(number(event.target.value, entry.zoom || 100) * 10) / 10, 50, 240);
+        entry.zoom = zoom;
+        event.target.closest('.figure-zoom-row')?.querySelectorAll('[data-figure-field="zoom"]').forEach(control => { control.value = zoom; });
+        renderWbFigure();
+        return;
+      }
       if (!event.target.hasAttribute('data-figure-centers')) return;
       const index = Number(event.target.dataset.figureIndex);
       const entry = figure.images[index];
