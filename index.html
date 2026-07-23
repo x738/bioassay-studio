@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-app-version="2.8.1">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -9,8 +9,7 @@
     <link rel="icon" href="icon.svg" type="image/svg+xml" />
     <link rel="manifest" href="manifest.webmanifest" />
     <title>BioAssay Studio | 科研数据与实验知识库</title>
-    <link rel="stylesheet" href="styles.css?v=2.7.0-r1" />
-    <link rel="stylesheet" href="experiment-library.css?v=2.7.0-r1" />
+    <link rel="stylesheet" href="styles.css?v=2.8.1" />
   </head>
   <body>
     <header class="app-header">
@@ -25,6 +24,7 @@
         <div class="privacy-note">本地浏览器处理 · 不上传数据</div>
         <button id="undoAction" class="header-action history-action" type="button" disabled title="撤销（Ctrl+Z）">撤销</button>
         <button id="redoAction" class="header-action history-action" type="button" disabled title="重做（Ctrl+Y）">重做</button>
+        <button id="desktopUpdateButton" class="header-action" type="button" hidden>检查更新</button>
         <button id="exportAudit" class="header-action" type="button">完整性报告</button>
         <button id="saveProject" class="header-action" type="button">保存项目</button>
         <label class="header-action file-button direct-file-picker"><span>恢复项目</span><input id="restoreProjectInput" type="file" accept="application/json,.json" aria-label="从电脑选择 BioAssay Studio 项目文件" /></label>
@@ -466,7 +466,7 @@
     </main>
 
     <footer class="app-footer">
-      <div><strong>BioAssay Studio v2.7.0</strong><span>科研数据与实验知识库均在当前浏览器中处理，网站不接收上传内容。</span></div>
+      <div><strong>BioAssay Studio v2.8.1</strong><span>科研数据与实验知识库均在本机处理，网站不接收上传内容。</span></div>
       <nav aria-label="网站信息"><a href="privacy.html">隐私与数据处理</a><a href="THIRD_PARTY_NOTICES.txt">第三方许可</a><a href="README.md">使用说明</a></nav>
     </footer>
 
@@ -480,12 +480,8 @@
     </dialog>
 
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
-  <script src="analysis-core.js?v=2.7.0-r1"></script>
-    <script src="vendor/xlsx.full.min.js"></script>
+  <script src="analysis-core.js?v=2.8.1"></script>
     <script src="vendor/chart.umd.js"></script>
-    <script src="vendor/UTIF.js"></script>
-  <script src="experiment-core.js?v=2.7.0-r1"></script>
-  <script src="app.js?v=2.7.0-r1"></script>
-  <script src="experiment-library.js?v=2.7.0-r1"></script>
+  <script src="app.js?v=2.8.1"></script>
   </body>
 </html>

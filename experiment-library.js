@@ -22,7 +22,8 @@
     page: 'home',
     selection: null,
     records: Object.fromEntries(STORE_NAMES.map(name => [name, []])),
-    autosaveTimer: null,
+    autosaveTimers: new Map(),
+    pendingSaves: new Map(),
     autosaveState: 'saved',
     calculatorTab: 'buffer',
     calculatorDraft: {
@@ -46,6 +47,17 @@
     searchQuery: '',
     searchResults: [],
     objectUrls: new Set(),
+    storage: { persisted: false, usage: 0, quota: 0 },
+    print: {
+      open: false,
+      selectedKeys: [],
+      paper: 'A4',
+      orientation: 'portrait',
+      fontSize: 10.5,
+      includeMetadata: true,
+      includeNotes: true,
+      includeAttachments: true,
+    },
   };
 
   function uid(prefix = 'item') {
@@ -78,6 +90,28 @@
     if (!value) return '—';
     const date = new Date(value);
     return Number.isNaN(date.getTime()) ? '—' : date.toLocaleString('zh-CN', { hour12: false });
+  }
+
+  function fileSizeText(bytes) {
+    if (!(bytes > 0)) return '0 MB';
+    if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(1)} GB`;
+    return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
+  }
+
+  async function inspectStorage() {
+    if (!navigator.storage) return;
+    try {
+      let persisted = typeof navigator.storage.persisted === 'function' ? await navigator.storage.persisted() : false;
+      if (!persisted && typeof navigator.storage.persist === 'function') persisted = await navigator.storage.persist();
+      const estimate = typeof navigator.storage.estimate === 'function' ? await navigator.storage.estimate() : {};
+      state.storage = {
+        persisted: Boolean(persisted),
+        usage: Number(estimate.usage) || 0,
+        quota: Number(estimate.quota) || 0,
+      };
+    } catch (error) {
+      console.warn('Storage inspection failed', error);
+    }
   }
 
   function openDatabase() {
@@ -120,12 +154,17 @@
   }
 
   const dbGetAll = storeName => transaction(storeName, 'readonly', store => store.getAll());
+  const dbGet = (storeName, id) => transaction(storeName, 'readonly', store => store.get(id));
   const dbPut = (storeName, value) => transaction(storeName, 'readwrite', store => store.put(value));
   const dbDelete = (storeName, id) => transaction(storeName, 'readwrite', store => store.delete(id));
   const dbClear = storeName => transaction(storeName, 'readwrite', store => store.clear());
 
   async function loadRecords() {
-    const entries = await Promise.all(STORE_NAMES.map(async storeName => [storeName, await dbGetAll(storeName)]));
+    const entries = await Promise.all(STORE_NAMES.map(async storeName => {
+      const records = await dbGetAll(storeName);
+      if (storeName !== 'attachments') return [storeName, records];
+      return [storeName, records.map(({ blob, ...metadata }) => metadata)];
+    }));
     state.records = Object.fromEntries(entries);
     Object.values(state.records).forEach(list => list.sort((a, b) => String(b.updatedAt || b.createdAt || '').localeCompare(String(a.updatedAt || a.createdAt || ''))));
   }
@@ -235,12 +274,13 @@
     mount.innerHTML = `
       <div class="el-toolbar">
         <div>
-          <span class="el-offline-badge">OFFLINE · IndexedDB</span>
+          <span class="el-offline-badge">OFFLINE · IndexedDB · ${state.storage.persisted ? '持久存储' : '建议定期备份'}${state.storage.usage ? ` · ${fileSizeText(state.storage.usage)}` : ''}</span>
           <strong>个人实验知识库</strong>
           <span id="elAutosaveStatus" data-state="${state.autosaveState}">已自动保存</span>
         </div>
         <div class="el-toolbar-actions">
           <span id="elNotice" class="el-notice">全部数据仅保存在当前浏览器</span>
+          <button type="button" data-el-action="open-print">打印 / 预览</button>
           <button type="button" data-el-action="export-library">导出备份</button>
           <label class="el-file-button">导入备份<input id="elBackupInput" type="file" accept=".json,application/json" /></label>
           <button type="button" data-el-action="cycle-theme">主题：跟随系统</button>
@@ -259,7 +299,8 @@
         </aside>
         <section id="elMain" class="el-main">${renderMain()}</section>
         <aside id="elProperties" class="el-properties">${renderProperties()}</aside>
-      </div>`;
+      </div>
+      ${renderPrintDialog()}`;
     setTheme(localStorage.getItem('bioassay-experiment-theme') || 'system');
   }
 
@@ -405,7 +446,7 @@
     return `
       <div class="el-editor-head">
         <div><span>实验配方 · v${recipe.version || 1}</span><input class="el-title-input" data-el-field="name" value="${escapeAttr(recipe.name || '')}" placeholder="配方名称" /></div>
-        <div><button type="button" data-el-action="copy-recipe">复制表格</button><button type="button" class="primary" data-el-action="recalculate-recipe">重新计算</button></div>
+        <div><button type="button" data-el-action="print-current">打印预览</button><button type="button" data-el-action="copy-recipe">复制表格</button><button type="button" class="primary" data-el-action="recalculate-recipe">重新计算</button></div>
       </div>
       <div class="el-recipe-meta-grid">
         <label>目标体积<div class="el-inline-field"><input data-el-field="targetVolume" type="number" min="0.000001" step="any" value="${escapeAttr(recipe.targetVolume || '')}" /><select data-el-field="targetVolumeUnit">${['mL', 'L', 'µL'].map(unit => `<option ${recipe.targetVolumeUnit === unit ? 'selected' : ''}>${unit}</option>`).join('')}</select></div></label>
@@ -448,7 +489,7 @@
     return `
       <div class="el-editor-head">
         <div><span>实验方法 · Markdown · v${protocol.version || 1}</span><input class="el-title-input" data-el-field="name" value="${escapeAttr(protocol.name || '')}" placeholder="实验名称" /></div>
-        <div><button type="button" data-el-action="toggle-protocol-preview">${protocol.preview ? '编辑 Markdown' : '预览'}</button></div>
+        <div><button type="button" data-el-action="print-current">打印预览</button><button type="button" data-el-action="toggle-protocol-preview">${protocol.preview ? '编辑 Markdown' : '预览'}</button></div>
       </div>
       <div class="el-protocol-meta">
         <label>实验目的<textarea data-el-field="purpose" rows="3" placeholder="说明实验要回答的问题">${escapeHtml(protocol.purpose || '')}</textarea></label>
@@ -479,11 +520,233 @@
       .join('');
   }
 
+  function printableEntries() {
+    return [
+      ...state.records.recipes.map(record => ({ store: 'recipes', record, key: `recipes:${record.id}`, kind: '实验配方' })),
+      ...state.records.protocols.map(record => ({ store: 'protocols', record, key: `protocols:${record.id}`, kind: '实验方法' })),
+      ...state.records.stocks.map(record => ({ store: 'stocks', record, key: `stocks:${record.id}`, kind: '母液配置' })),
+    ].sort((a, b) => String(b.record.updatedAt || '').localeCompare(String(a.record.updatedAt || '')));
+  }
+
+  function openPrintDialog(currentOnly = false) {
+    const entries = printableEntries();
+    const currentKey = state.selection && ['recipes', 'protocols', 'stocks'].includes(state.selection.store)
+      ? `${state.selection.store}:${state.selection.id}`
+      : '';
+    const validKeys = new Set(entries.map(item => item.key));
+    const retained = state.print.selectedKeys.filter(key => validKeys.has(key));
+    state.print.selectedKeys = currentOnly && currentKey
+      ? [currentKey]
+      : retained.length
+        ? retained
+        : currentKey
+          ? [currentKey]
+          : entries[0]
+            ? [entries[0].key]
+            : [];
+    state.print.open = true;
+    renderShell();
+  }
+
+  function closePrintDialog() {
+    state.print.open = false;
+    renderShell();
+  }
+
+  function printValue(value, fallback = '—') {
+    const text = String(value ?? '').trim();
+    return escapeHtml(text || fallback);
+  }
+
+  function renderPrintMetadata(items) {
+    const visible = items.filter(([, value]) => String(value ?? '').trim());
+    if (!state.print.includeMetadata || !visible.length) return '';
+    return `<dl class="el-print-meta">${visible.map(([label, value]) => `<div><dt>${escapeHtml(label)}</dt><dd>${printValue(value)}</dd></div>`).join('')}</dl>`;
+  }
+
+  function renderPrintTextSection(title, value) {
+    const text = String(value || '').trim();
+    if (!text) return '';
+    return `<section class="el-print-section"><h2>${escapeHtml(title)}</h2><div class="el-print-prose">${escapeHtml(text).replace(/\n/g, '<br>')}</div></section>`;
+  }
+
+  function renderPrintAttachments(store, record) {
+    if (!state.print.includeAttachments) return '';
+    const ownerKey = `${store}:${record.id}`;
+    const attachments = state.records.attachments.filter(item => item.ownerKey === ownerKey);
+    if (!attachments.length) return '';
+    return `<section class="el-print-section el-print-attachments"><h2>附件清单</h2><ul>${attachments.map(item => `<li>${escapeHtml(item.name || '未命名附件')} <span>${escapeHtml(item.type || '')}${item.size ? ` · ${fileSizeText(item.size)}` : ''}</span></li>`).join('')}</ul></section>`;
+  }
+
+  function renderRecipePrint(recipe) {
+    const rows = (recipe.components || []).map(component => {
+      const stock = state.records.stocks.find(item => item.id === component.stockId);
+      const source = stock
+        ? `${stock.name || '母液'} (${stock.concentration || ''} ${stock.unit || ''})`
+        : component.sourceType === 'solid'
+          ? '固体称量'
+          : component.sourceType === 'stock'
+            ? '调用母液'
+            : '自动选择';
+      return `<tr>
+        <td>${printValue(component.name)}</td>
+        <td>${printValue(`${component.targetValue ?? ''} ${component.targetUnit || ''}`)}</td>
+        <td>${printValue(source)}</td>
+        <td>${printValue(component.molecularWeight)}</td>
+        <td><strong>${printValue(Core.formatQuantity(component.actualAmount))}</strong></td>
+        <td>${printValue(component.basis)}</td>
+      </tr>`;
+    }).join('');
+    const steps = (recipe.steps || []).filter(step => String(step || '').trim());
+    return `
+      ${renderPrintMetadata([
+        ['用途', recipe.purpose],
+        ['目标体积', `${recipe.targetVolume || '—'} ${recipe.targetVolumeUnit || ''}`],
+        ['目标 pH', recipe.targetPh],
+        ['保存条件', recipe.storage],
+        ['分类', recipe.category],
+        ['标签', (recipe.tags || []).join('、')],
+      ])}
+      <section class="el-print-section">
+        <h2>配方组成</h2>
+        <table class="el-print-table">
+          <thead><tr><th>成分</th><th>最终浓度</th><th>来源 / 母液</th><th>MW</th><th>实际加入量</th><th>计算依据</th></tr></thead>
+          <tbody>${rows || '<tr><td colspan="6">尚未填写配方成分</td></tr>'}</tbody>
+        </table>
+      </section>
+      <section class="el-print-section">
+        <h2>配制步骤</h2>
+        ${steps.length ? `<ol class="el-print-steps">${steps.map(step => `<li>${escapeHtml(step)}</li>`).join('')}</ol>` : '<p class="el-print-empty">尚未填写配制步骤。</p>'}
+      </section>
+      ${state.print.includeNotes ? renderPrintTextSection('备注', recipe.notes) : ''}
+      ${renderPrintAttachments('recipes', recipe)}`;
+  }
+
+  function renderProtocolPrint(protocol) {
+    return `
+      ${renderPrintMetadata([
+        ['分类', protocol.category],
+        ['标签', (protocol.tags || []).join('、')],
+        ['创建时间', dateText(protocol.createdAt)],
+        ['修改时间', dateText(protocol.updatedAt)],
+      ])}
+      ${renderPrintTextSection('实验目的', protocol.purpose)}
+      ${renderPrintTextSection('实验材料', protocol.materials)}
+      <section class="el-print-section">
+        <h2>实验步骤</h2>
+        <article class="el-print-markdown">${renderMarkdown(protocol.markdown || '')}</article>
+      </section>
+      ${renderPrintTextSection('注意事项', protocol.cautions)}
+      ${renderPrintTextSection('常见问题', protocol.troubleshooting)}
+      ${renderPrintTextSection('参考文献', protocol.references)}
+      ${state.print.includeNotes ? renderPrintTextSection('备注', protocol.notes) : ''}
+      ${renderPrintAttachments('protocols', protocol)}`;
+  }
+
+  function renderStockPrint(stock) {
+    const chemical = state.records.chemicals.find(item => item.id === stock.chemicalId);
+    const records = (stock.records || []).map(row => `<tr><td>${printValue(row.date)}</td><td>${printValue(row.volume)}</td><td>${printValue(row.operator)}</td><td>${printValue(row.notes)}</td></tr>`).join('');
+    return `
+      ${renderPrintMetadata([
+        ['对应试剂', chemical?.name],
+        ['母液浓度', `${stock.concentration || '—'} ${stock.unit || ''}`],
+        ['分子量', stock.molecularWeight || chemical?.molecularWeight],
+        ['有效期', stock.expiryDays ? `${stock.expiryDays} 天` : ''],
+        ['保存条件', stock.storage],
+        ['分类', stock.category],
+        ['标签', (stock.tags || []).join('、')],
+      ])}
+      ${renderPrintTextSection('配制方法', stock.preparation)}
+      ${records ? `<section class="el-print-section"><h2>配置记录</h2><table class="el-print-table"><thead><tr><th>日期</th><th>体积</th><th>操作者</th><th>备注</th></tr></thead><tbody>${records}</tbody></table></section>` : ''}
+      ${state.print.includeNotes ? renderPrintTextSection('备注', stock.notes) : ''}
+      ${renderPrintAttachments('stocks', stock)}`;
+  }
+
+  function renderPrintRecord(entry, index, total) {
+    const record = entry.record;
+    const content = entry.store === 'recipes'
+      ? renderRecipePrint(record)
+      : entry.store === 'protocols'
+        ? renderProtocolPrint(record)
+        : renderStockPrint(record);
+    return `<article class="el-print-record">
+      <header class="el-print-record-head">
+        <div><span>BIOASSAY STUDIO · ${escapeHtml(entry.kind.toUpperCase())}</span><h1>${escapeHtml(record.name || '未命名')}</h1></div>
+        <div><b>v${record.version || 1}</b><small>${escapeHtml(dateText(record.updatedAt))}</small></div>
+      </header>
+      ${content}
+      <footer class="el-print-footer"><span>BioAssay Studio v${escapeHtml(document.documentElement.dataset.appVersion || '2.8.1')}</span><span>${index + 1} / ${total} · 打印预览生成于 ${escapeHtml(dateText(now()))}</span></footer>
+    </article>`;
+  }
+
+  function renderPrintDialog() {
+    if (!state.print.open) return '';
+    const entries = printableEntries();
+    const selected = new Set(state.print.selectedKeys);
+    const selectedEntries = entries.filter(item => selected.has(item.key));
+    const list = entries.length
+      ? entries.map(item => `<label class="el-print-choice">
+          <input type="checkbox" data-el-print-key="${escapeAttr(item.key)}" ${selected.has(item.key) ? 'checked' : ''} />
+          <span><b>${escapeHtml(item.record.name || '未命名')}</b><small>${escapeHtml(item.kind)} · ${escapeHtml(item.record.category || '未分类')}</small></span>
+        </label>`).join('')
+      : '<div class="el-print-no-records">暂无可打印的实验配方、方法或母液配置。</div>';
+    const documents = selectedEntries.length
+      ? selectedEntries.map((entry, index) => renderPrintRecord(entry, index, selectedEntries.length)).join('')
+      : '<div class="el-print-empty-preview"><b>选择需要打印的内容</b><span>可以组合多个配方、实验方法或母液配置，每条记录自动从新页开始。</span></div>';
+    return `<div class="el-print-overlay" role="dialog" aria-modal="true" aria-label="知识库打印预览">
+      <div class="el-print-window">
+        <header class="el-print-window-head">
+          <div><span>PRINT CENTER</span><h2>知识库打印预览</h2><p>选择内容后由系统自动生成科研文档版式。</p></div>
+          <div><button type="button" data-el-action="close-print">关闭</button><button type="button" class="primary" data-el-action="system-print" ${selectedEntries.length ? '' : 'disabled'}>打印 / 另存为 PDF</button></div>
+        </header>
+        <div class="el-print-layout">
+          <aside class="el-print-controls">
+            <section><div class="el-print-control-title"><b>打印内容</b><span>${selectedEntries.length} / ${entries.length}</span></div>
+              <div class="el-print-bulk"><button type="button" data-el-action="print-select-all">全选</button><button type="button" data-el-action="print-clear-all">清空</button></div>
+              <div class="el-print-choice-list">${list}</div>
+            </section>
+            <section class="el-print-options">
+              <b>页面设置</b>
+              <label>纸张<select data-el-print-option="paper"><option ${state.print.paper === 'A4' ? 'selected' : ''}>A4</option><option ${state.print.paper === 'A5' ? 'selected' : ''}>A5</option></select></label>
+              <label>方向<select data-el-print-option="orientation"><option value="portrait" ${state.print.orientation === 'portrait' ? 'selected' : ''}>纵向</option><option value="landscape" ${state.print.orientation === 'landscape' ? 'selected' : ''}>横向</option></select></label>
+              <label>正文字号<select data-el-print-option="fontSize">${[9, 10, 10.5, 11, 12].map(size => `<option value="${size}" ${Number(state.print.fontSize) === size ? 'selected' : ''}>${size} pt</option>`).join('')}</select></label>
+              <label class="check"><input type="checkbox" data-el-print-option="includeMetadata" ${state.print.includeMetadata ? 'checked' : ''} /><span>显示分类、标签和版本信息</span></label>
+              <label class="check"><input type="checkbox" data-el-print-option="includeNotes" ${state.print.includeNotes ? 'checked' : ''} /><span>显示备注</span></label>
+              <label class="check"><input type="checkbox" data-el-print-option="includeAttachments" ${state.print.includeAttachments ? 'checked' : ''} /><span>显示附件清单</span></label>
+            </section>
+            <p class="el-print-tip">打印时会隐藏软件界面，只输出右侧白色文档。系统打印窗口中可以选择打印机或“另存为 PDF”。</p>
+          </aside>
+          <main class="el-print-preview">
+            <div id="elPrintContent" class="el-print-sheet ${state.print.paper.toLowerCase()} ${state.print.orientation}" style="--el-print-font-size:${Number(state.print.fontSize) || 10.5}pt">${documents}</div>
+          </main>
+        </div>
+      </div>
+    </div>`;
+  }
+
+  async function printSelectedRecords() {
+    if (!state.print.selectedKeys.length) {
+      notice('请至少选择一条需要打印的记录。', 'bad');
+      return;
+    }
+    await flushPendingSaves();
+    let style = document.getElementById('elDynamicPrintPage');
+    if (!style) {
+      style = document.createElement('style');
+      style.id = 'elDynamicPrintPage';
+      document.head.append(style);
+    }
+    const paper = state.print.paper === 'A5' ? 'A5' : 'A4';
+    const orientation = state.print.orientation === 'landscape' ? 'landscape' : 'portrait';
+    style.textContent = `@page { size: ${paper} ${orientation}; margin: 12mm; }`;
+    window.requestAnimationFrame(() => window.print());
+  }
+
   function renderStockEditor(stock) {
     return `
       <div class="el-editor-head">
         <div><span>STOCK SOLUTION</span><input class="el-title-input" data-el-field="name" value="${escapeAttr(stock.name || '')}" placeholder="如：1 M HEPES" /></div>
-        <div><button type="button" class="primary" data-el-action="create-stock-recipe">生成母液配制配方</button></div>
+        <div><button type="button" data-el-action="print-current">打印预览</button><button type="button" class="primary" data-el-action="create-stock-recipe">生成母液配制配方</button></div>
       </div>
       <div class="el-stock-grid">
         <label>对应试剂<select data-el-field="chemicalId"><option value="">未关联试剂</option>${state.records.chemicals.map(item => `<option value="${item.id}" ${stock.chemicalId === item.id ? 'selected' : ''}>${escapeHtml(item.name)} · MW ${escapeHtml(String(item.molecularWeight || '—'))}</option>`).join('')}</select></label>
@@ -736,21 +999,42 @@
     return record;
   }
 
+  async function flushSave(key) {
+    const pending = state.pendingSaves.get(key);
+    if (!pending) return;
+    const timer = state.autosaveTimers.get(key);
+    if (timer) window.clearTimeout(timer);
+    state.autosaveTimers.delete(key);
+    state.pendingSaves.delete(key);
+    try {
+      await dbPut(pending.store, pending.record);
+      if (!state.pendingSaves.size) setAutosaveState('saved');
+    } catch (error) {
+      console.error(error);
+      setAutosaveState('error');
+      notice(`自动保存失败：${error.message}`, 'bad');
+      throw error;
+    }
+  }
+
+  async function flushPendingSaves() {
+    const keys = [...state.pendingSaves.keys()];
+    if (!keys.length) return;
+    await Promise.allSettled(keys.map(flushSave));
+  }
+
   function scheduleSave(record, store = state.selection?.store) {
-    if (!record || !store) return;
+    if (!record || !store || !record.id) return;
     record.updatedAt = now();
+    const key = `${store}:${record.id}`;
     setAutosaveState('saving');
-    window.clearTimeout(state.autosaveTimer);
-    state.autosaveTimer = window.setTimeout(async () => {
-      try {
-        await dbPut(store, record);
-        setAutosaveState('saved');
-      } catch (error) {
-        console.error(error);
-        setAutosaveState('error');
-        notice(`自动保存失败：${error.message}`, 'bad');
-      }
+    const previousTimer = state.autosaveTimers.get(key);
+    if (previousTimer) window.clearTimeout(previousTimer);
+    state.pendingSaves.set(key, { store, record });
+    const timer = window.setTimeout(() => {
+      flushSave(key).catch(() => {});
     }, 480);
+    state.autosaveTimers.set(key, timer);
   }
 
   function updateRecordField(field, rawValue, element) {
@@ -1177,7 +1461,8 @@
         updatedAt: now(),
       };
       await dbPut('attachments', attachment);
-      state.records.attachments.unshift(attachment);
+      const { blob, ...metadata } = attachment;
+      state.records.attachments.unshift(metadata);
     }
     refreshMain();
     notice(`已保存 ${files.length} 个附件到本地知识库。`, 'good');
@@ -1188,7 +1473,8 @@
     const payload = { schema: 'bioassay-experiment-library', version: 1, exportedAt: now(), stores: {} };
     for (const storeName of STORE_NAMES) {
       payload.stores[storeName] = [];
-      for (const record of state.records[storeName]) {
+      const storedRecords = await dbGetAll(storeName);
+      for (const record of storedRecords) {
         const item = { ...record };
         if (item.blob instanceof Blob) {
           item.blobDataUrl = await readFileAsDataUrl(item.blob);
@@ -1204,24 +1490,42 @@
 
   async function importLibrary(file) {
     try {
+      if (!file || file.size > 512 * 1024 * 1024) throw new Error('备份文件无效或超过 512 MB，请拆分附件后重试。');
       const payload = JSON.parse(await readFileAsText(file));
       if (payload?.schema !== 'bioassay-experiment-library' || !payload.stores) throw new Error('不是有效的 BioAssay 实验知识库备份');
-      if (!window.confirm('导入将合并同 ID 记录；同 ID 的现有记录会被备份内容覆盖。是否继续？')) return;
+      const prepared = {};
+      let recordCount = 0;
       for (const storeName of STORE_NAMES) {
-        for (const raw of payload.stores[storeName] || []) {
+        const sourceRecords = payload.stores[storeName] || [];
+        if (!Array.isArray(sourceRecords)) throw new Error(`备份中的 ${storeName} 数据结构无效。`);
+        prepared[storeName] = sourceRecords.map(raw => {
+          if (!raw || typeof raw !== 'object' || !String(raw.id || '').trim()) throw new Error(`${storeName} 中存在缺少 ID 的记录。`);
           const record = { ...raw };
           if (record.blobDataUrl) {
             record.blob = dataUrlToBlob(record.blobDataUrl);
             delete record.blobDataUrl;
           }
-          await dbPut(storeName, record);
-        }
+          return record;
+        });
+        recordCount += prepared[storeName].length;
       }
+      if (recordCount > 100000) throw new Error('备份记录超过 100000 条，已停止导入以避免浏览器失去响应。');
+      if (!window.confirm('导入将合并同 ID 记录；同 ID 的现有记录会被备份内容覆盖。是否继续？')) return;
+      await new Promise((resolve, reject) => {
+        const tx = state.db.transaction(STORE_NAMES, 'readwrite');
+        for (const storeName of STORE_NAMES) {
+          const store = tx.objectStore(storeName);
+          prepared[storeName].forEach(record => store.put(record));
+        }
+        tx.oncomplete = resolve;
+        tx.onerror = () => reject(tx.error || new Error('备份事务写入失败'));
+        tx.onabort = () => reject(tx.error || new Error('备份事务已回滚'));
+      });
       await loadRecords();
       state.selection = null;
       state.page = 'home';
       renderShell();
-      notice('知识库备份已导入。', 'good');
+      notice(`知识库备份已原子导入 ${recordCount} 条记录。`, 'good');
     } catch (error) {
       notice(`导入失败：${error.message}`, 'bad');
     }
@@ -1242,6 +1546,11 @@
     const record = selectedRecord();
     if (!record || !window.confirm(`确认删除“${record.name || record.title || '未命名记录'}”？此操作无法撤销。`)) return;
     const { store, id } = state.selection;
+    const saveKey = `${store}:${id}`;
+    const pendingTimer = state.autosaveTimers.get(saveKey);
+    if (pendingTimer) window.clearTimeout(pendingTimer);
+    state.autosaveTimers.delete(saveKey);
+    state.pendingSaves.delete(saveKey);
     await dbDelete(store, id);
     state.records[store] = state.records[store].filter(item => item.id !== id);
     const ownerKey = `${store}:${id}`;
@@ -1260,8 +1569,8 @@
     refreshMain();
   }
 
-  function openAttachment(id) {
-    const item = state.records.attachments.find(record => record.id === id);
+  async function openAttachment(id) {
+    const item = await dbGet('attachments', id);
     if (!item?.blob) return;
     downloadBlob(item.blob, item.name || 'attachment');
   }
@@ -1316,6 +1625,16 @@
       if (!actionButton) return;
       const action = actionButton.dataset.elAction;
       if (action === 'cycle-theme') cycleTheme();
+      else if (action === 'open-print') openPrintDialog(false);
+      else if (action === 'print-current') openPrintDialog(true);
+      else if (action === 'close-print') closePrintDialog();
+      else if (action === 'print-select-all') {
+        state.print.selectedKeys = printableEntries().map(item => item.key);
+        renderShell();
+      } else if (action === 'print-clear-all') {
+        state.print.selectedKeys = [];
+        renderShell();
+      } else if (action === 'system-print') await printSelectedRecords();
       else if (action === 'export-library') await exportLibrary();
       else if (action === 'toggle-favorite') {
         const record = selectedRecord();
@@ -1326,7 +1645,7 @@
         }
       } else if (action === 'new-version') await createNewVersion();
       else if (action === 'delete-record') await deleteRecord();
-      else if (action === 'download-attachment') openAttachment(actionButton.dataset.elId);
+      else if (action === 'download-attachment') await openAttachment(actionButton.dataset.elId);
       else if (action === 'delete-attachment') await deleteAttachment(actionButton.dataset.elId);
       else if (action === 'recalculate-recipe') await recalculateRecipe(true);
       else if (action === 'reset-protocol') await recalculateRecipe(true);
@@ -1429,7 +1748,18 @@
     });
 
     mount.addEventListener('change', async event => {
-      if (event.target.id === 'elOcrInput') await importOcrFiles(event.target.files);
+      if (event.target.matches('[data-el-print-key]')) {
+        const key = event.target.dataset.elPrintKey;
+        const selected = new Set(state.print.selectedKeys);
+        if (event.target.checked) selected.add(key);
+        else selected.delete(key);
+        state.print.selectedKeys = [...selected];
+        renderShell();
+      } else if (event.target.matches('[data-el-print-option]')) {
+        const option = event.target.dataset.elPrintOption;
+        state.print[option] = event.target.type === 'checkbox' ? event.target.checked : option === 'fontSize' ? Number(event.target.value) : event.target.value;
+        renderShell();
+      } else if (event.target.id === 'elOcrInput') await importOcrFiles(event.target.files);
       else if (event.target.id === 'elAttachmentInput') await addAttachments(event.target.files);
       else if (event.target.id === 'elBackupInput' && event.target.files[0]) await importLibrary(event.target.files[0]);
       else if (event.target.matches('[data-el-calc-field]') && event.target.dataset.elCalcField === 'kind') refreshMain();
@@ -1438,7 +1768,10 @@
     });
 
     mount.addEventListener('keydown', event => {
-      if (event.target.id === 'elSearchInput' && event.key === 'Enter') {
+      if (event.key === 'Escape' && state.print.open) {
+        event.preventDefault();
+        closePrintDialog();
+      } else if (event.target.id === 'elSearchInput' && event.key === 'Enter') {
         event.preventDefault();
         runSearch();
       }
@@ -1450,6 +1783,7 @@
       state.db = await openDatabase();
       await loadRecords();
       await seedChemicals();
+      await inspectStorage();
       bindEvents();
       renderShell();
     } catch (error) {
@@ -1462,6 +1796,11 @@
     state.objectUrls.forEach(url => URL.revokeObjectURL(url));
     state.objectUrls.clear();
   });
+  window.addEventListener('pagehide', () => { flushPendingSaves(); });
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') flushPendingSaves();
+  });
 
+  window.ExperimentLibraryReady = true;
   init();
 })();

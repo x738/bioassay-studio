@@ -7,9 +7,10 @@
   const toast = $('#toast');
   const sheetDialog = $('#sheetDialog');
   const core = window.BioAssayCore;
-  const APP_VERSION = '2.6.0';
+  const APP_VERSION = document.documentElement.dataset.appVersion || '2.8.1';
   const auditLog = [];
   const history = { undo: [], redo: [], applying: false, max: 50 };
+  const resourcePromises = new Map();
 
   const qpcr = {
     step: 1,
@@ -66,6 +67,8 @@
     layouts: [],
     effectiveFrame: null,
   };
+  const figureStripBackgroundCache = new WeakMap();
+  let figureRenderFrame = 0;
 
   const coomassie = {
     replicates: 3,
@@ -134,6 +137,65 @@
 
   function clamp(value, min, max) {
     return Math.max(min, Math.min(max, value));
+  }
+
+  function loadScriptOnce(src, ready) {
+    if (typeof ready === 'function' && ready()) return Promise.resolve();
+    if (resourcePromises.has(src)) return resourcePromises.get(src);
+    const promise = new Promise((resolve, reject) => {
+      const existing = document.querySelector(`script[data-dynamic-src="${src}"]`);
+      if (existing) {
+        existing.addEventListener('load', resolve, { once: true });
+        existing.addEventListener('error', () => reject(new Error(`无法载入 ${src}`)), { once: true });
+        return;
+      }
+      const script = document.createElement('script');
+      script.src = src;
+      script.async = true;
+      script.dataset.dynamicSrc = src;
+      script.addEventListener('load', resolve, { once: true });
+      script.addEventListener('error', () => reject(new Error(`无法载入 ${src}`)), { once: true });
+      document.head.appendChild(script);
+    }).then(() => {
+      if (typeof ready === 'function' && !ready()) throw new Error(`${src} 已下载但未正确初始化`);
+    }).catch(error => {
+      resourcePromises.delete(src);
+      throw error;
+    });
+    resourcePromises.set(src, promise);
+    return promise;
+  }
+
+  function loadStylesheetOnce(href) {
+    if (document.querySelector(`link[data-dynamic-href="${href}"]`)) return Promise.resolve();
+    if (resourcePromises.has(href)) return resourcePromises.get(href);
+    const promise = new Promise((resolve, reject) => {
+      const link = document.createElement('link');
+      link.rel = 'stylesheet';
+      link.href = href;
+      link.dataset.dynamicHref = href;
+      link.addEventListener('load', resolve, { once: true });
+      link.addEventListener('error', () => reject(new Error(`无法载入 ${href}`)), { once: true });
+      document.head.appendChild(link);
+    }).catch(error => {
+      resourcePromises.delete(href);
+      throw error;
+    });
+    resourcePromises.set(href, promise);
+    return promise;
+  }
+
+  async function ensureExperimentLibraryLoaded() {
+    if (window.ExperimentLibraryReady) return;
+    const mount = $('#experimentLibraryMount');
+    if (mount && !mount.children.length) {
+      mount.innerHTML = '<div class="module-loading" role="status">正在打开离线实验知识库…</div>';
+    }
+    await Promise.all([
+      loadStylesheetOnce(`experiment-library.css?v=${APP_VERSION}`),
+      loadScriptOnce(`experiment-core.js?v=${APP_VERSION}`, () => Boolean(window.ExperimentCore)),
+    ]);
+    await loadScriptOnce(`experiment-library.js?v=${APP_VERSION}`, () => Boolean(window.ExperimentLibraryReady));
   }
 
   function mean(values) {
@@ -293,6 +355,7 @@
     };
     let image;
     if (isTiff) {
+      await loadScriptOnce('vendor/UTIF.js', () => Boolean(window.UTIF));
       if (!window.UTIF) throw new Error('TIFF 解码组件未载入');
       const ifds = UTIF.decode(buffer);
       const ifd = [...ifds].filter(entry => entry.t256 && entry.t257).sort((a, b) => (b.t256[0] * b.t257[0]) - (a.t256[0] * a.t257[0]))[0];
@@ -356,6 +419,43 @@
     const clean = JSON.stringify(report, (key, value) => key === 'raw' ? undefined : value, 2);
     downloadText(`bioassay-integrity-${new Date().toISOString().slice(0, 10)}.json`, clean, 'application/json;charset=utf-8');
     toastMessage('完整性报告已开始下载。');
+  }
+
+  function initDesktopUpdate() {
+    const button = $('#desktopUpdateButton');
+    const desktop = window.bioassayDesktop;
+    if (!button || !desktop?.isDesktop || typeof desktop.checkForUpdates !== 'function') return;
+    button.hidden = false;
+    button.addEventListener('click', async () => {
+      button.disabled = true;
+      button.textContent = '检查中…';
+      try {
+        const result = await desktop.checkForUpdates();
+        if (!result?.ok && result?.code === 'development') toastMessage('开发模式不执行在线更新检查。');
+        if (!result?.ok && result?.code === 'busy') toastMessage('正在检查更新，请稍候。');
+      } catch (error) {
+        button.disabled = false;
+        button.textContent = '检查更新';
+        toastMessage(`检查更新失败：${error?.message || '未知错误'}`);
+      }
+    });
+    desktop.onUpdateStatus?.(detail => {
+      const status = detail?.status || '';
+      if (status === 'checking') {
+        button.disabled = true;
+        button.textContent = '检查中…';
+      } else if (status === 'downloading') {
+        button.disabled = true;
+        button.textContent = `下载 ${Math.round(Number(detail?.percent) || 0)}%`;
+      } else if (status === 'downloaded') {
+        button.disabled = false;
+        button.textContent = '更新已下载';
+      } else {
+        button.disabled = false;
+        button.textContent = '检查更新';
+      }
+      if (detail?.message && !['checking', 'downloading'].includes(status)) toastMessage(detail.message);
+    });
   }
 
   function downloadText(filename, content, type = 'text/csv;charset=utf-8') {
@@ -725,6 +825,7 @@
     try {
       const extension = file.name.split('.').pop().toLowerCase();
       if (['xlsx', 'xls'].includes(extension)) {
+        await loadScriptOnce('vendor/xlsx.full.min.js', () => Boolean(window.XLSX));
         if (!window.XLSX) throw new Error('Excel 解析组件未加载。');
         const workbook = XLSX.read(await file.arrayBuffer(), { type: 'array' });
         if (workbook.SheetNames.length === 1) return ingestSheet(workbook, workbook.SheetNames[0]);
@@ -3144,13 +3245,19 @@
   function figureLaneCandidates(entry, expectedCount) {
     const sourceWidth = entry.image.naturalWidth || entry.image.width;
     const sourceHeight = entry.image.naturalHeight || entry.image.height;
-    const detection = findBandCandidatesFromMap(figureSignalMap(entry.image), sourceWidth, sourceHeight, 65, expectedCount, 1, 0, number($('#figureMarkerPercent').value, 0));
+    const markerPercent = number($('#figureMarkerPercent').value, 0);
+    const cacheKey = `${expectedCount || 0}|${markerPercent}|${sourceWidth}x${sourceHeight}`;
+    if (entry._figureCandidateCache?.key === cacheKey) return entry._figureCandidateCache.candidates;
+    if (!entry._figureSignalMap) entry._figureSignalMap = figureSignalMap(entry.image);
+    const detection = findBandCandidatesFromMap(entry._figureSignalMap, sourceWidth, sourceHeight, 65, expectedCount, 1, 0, markerPercent);
     const strongestByLane = new Map();
     detection.candidates.sort((a, b) => b.score - a.score).forEach(candidate => {
       if (!strongestByLane.has(candidate.laneIndex)) strongestByLane.set(candidate.laneIndex, candidate);
     });
     const strongest = [...strongestByLane.values()].sort((a, b) => a.laneIndex - b.laneIndex);
-    return supplementExpectedLaneCandidates(strongest, expectedCount, sourceWidth, sourceHeight);
+    const candidates = supplementExpectedLaneCandidates(strongest, expectedCount, sourceWidth, sourceHeight);
+    entry._figureCandidateCache = { key: cacheKey, candidates };
+    return candidates;
   }
 
   function renderFigurePanelInputs() {
@@ -3415,7 +3522,7 @@
         figure.selectedGuide = { index: layout.index, centerIndex };
         figure.editTool = 'select';
         renderFigurePanelInputs();
-        renderWbFigure();
+        scheduleWbFigureRender();
         toastMessage(`已增加第 ${centerIndex + 1} 条黄线，并同步增加名称项。`);
         return;
       }
@@ -3423,14 +3530,14 @@
       const closestDistance = entry.manualCenters.length ? Math.abs(entry.manualCenters[centerIndex] - normalized) : Infinity;
       if (closestDistance > 0.05) {
         figure.selectedGuide = null;
-        renderWbFigure();
+        scheduleWbFigureRender();
         return;
       }
       pushHistory('移动手动泳道线');
       figure.selectedGuide = { index: layout.index, centerIndex };
       figure.dragging = { index: layout.index, centerIndex };
       figureCanvas.setPointerCapture(event.pointerId);
-      renderWbFigure();
+      scheduleWbFigureRender();
     });
     figureCanvas.addEventListener('pointermove', event => {
       if (figure.frameResize) {
@@ -3445,7 +3552,7 @@
         if (figure.frameResize.handle.includes('top')) nextHeight -= verticalDelta * 2;
         $('#figureFrameWidth').value = clamp(Math.round(nextWidth), 140, 920);
         $('#figureFrameHeight').value = clamp(Math.round(nextHeight), 32, 220);
-        renderWbFigure();
+        scheduleWbFigureRender();
         return;
       }
       if (!figure.dragging) return;
@@ -3458,7 +3565,7 @@
       const lower = centerIndex > 0 ? entry.manualCenters[centerIndex - 1] + minimumGap : 0;
       const upper = centerIndex < entry.manualCenters.length - 1 ? entry.manualCenters[centerIndex + 1] - minimumGap : 1;
       entry.manualCenters[centerIndex] = clamp(figureSourcePositionAtCanvasX(layout, point.x), lower, upper);
-      renderWbFigure();
+      scheduleWbFigureRender();
     });
     const finish = () => {
       if (figure.frameResize) {
@@ -3475,7 +3582,7 @@
       }
       figure.dragging = null;
       renderFigurePanelInputs();
-      renderWbFigure();
+      scheduleWbFigureRender();
     };
     figureCanvas.addEventListener('pointerup', finish);
     figureCanvas.addEventListener('pointercancel', finish);
@@ -3777,29 +3884,44 @@
     };
   }
 
-  function composeFigureFrame(stripCanvas, width, height, zoomPercent = 100, verticalOffset = 0) {
-    const frameCanvas = document.createElement('canvas');
-    frameCanvas.width = width;
-    frameCanvas.height = height;
-    const frameCtx = frameCanvas.getContext('2d', { willReadFrequently: true });
+  function cachedFigureStrip(entry, xCandidates, bandCandidates, padding, whiteBackground, rotationDegrees = 0, backgroundStrength = 62, preserveColor = true) {
+    const geometry = bandCandidates.map(candidate => [
+      number(candidate.x, 0).toFixed(2),
+      number(candidate.y, 0).toFixed(2),
+      number(candidate.width, 0).toFixed(2),
+      number(candidate.height, 0).toFixed(2),
+    ]);
+    const key = JSON.stringify([
+      geometry,
+      padding,
+      Boolean(whiteBackground),
+      number(rotationDegrees, 0).toFixed(3),
+      backgroundStrength,
+      Boolean(preserveColor),
+    ]);
+    if (entry._figureStripCache?.key === key) return entry._figureStripCache.value;
+    const value = buildFigureStrip(entry, xCandidates, bandCandidates, padding, whiteBackground, rotationDegrees, backgroundStrength, preserveColor);
+    entry._figureStripCache = { key, value };
+    return value;
+  }
+
+  function figureStripBackground(stripCanvas) {
+    const cached = figureStripBackgroundCache.get(stripCanvas);
+    if (cached) return cached;
     const sampleCtx = stripCanvas.getContext('2d', { willReadFrequently: true });
-    const samples = { r: [], g: [], b: [] };
     const sample = sampleCtx.getImageData(0, 0, stripCanvas.width, stripCanvas.height).data;
     const edgeDepth = Math.max(1, Math.round(stripCanvas.height * 0.16));
     const step = Math.max(1, Math.round(stripCanvas.width / 180));
+    const samples = { r: [], g: [], b: [] };
     for (let y = 0; y < stripCanvas.height; y += 1) {
       if (y >= edgeDepth && y < stripCanvas.height - edgeDepth) continue;
       for (let x = 0; x < stripCanvas.width; x += step) {
         const offset = (y * stripCanvas.width + x) * 4;
-        samples.r.push(sample[offset]); samples.g.push(sample[offset + 1]); samples.b.push(sample[offset + 2]);
+        samples.r.push(sample[offset]);
+        samples.g.push(sample[offset + 1]);
+        samples.b.push(sample[offset + 2]);
       }
     }
-    frameCtx.fillStyle = `rgb(${Math.round(percentile(samples.r, 0.5) || 255)}, ${Math.round(percentile(samples.g, 0.5) || 255)}, ${Math.round(percentile(samples.b, 0.5) || 255)})`;
-    frameCtx.fillRect(0, 0, width, height);
-    // Keep the whole black frame filled with membrane background even when the
-    // foreground strip is reduced or moved. A one-pixel horizontal background
-    // profile sampled from the strip edges preserves the original left-to-right
-    // membrane variation without duplicating or stretching the protein bands.
     const backgroundLine = document.createElement('canvas');
     backgroundLine.width = stripCanvas.width;
     backgroundLine.height = 1;
@@ -3828,9 +3950,29 @@
       backgroundLineData.data[target + 3] = 255;
     }
     backgroundLineCtx.putImageData(backgroundLineData, 0, 0);
+    const value = {
+      color: `rgb(${Math.round(percentile(samples.r, 0.5) || 255)}, ${Math.round(percentile(samples.g, 0.5) || 255)}, ${Math.round(percentile(samples.b, 0.5) || 255)})`,
+      line: backgroundLine,
+    };
+    figureStripBackgroundCache.set(stripCanvas, value);
+    return value;
+  }
+
+  function composeFigureFrame(stripCanvas, width, height, zoomPercent = 100, verticalOffset = 0) {
+    const frameCanvas = document.createElement('canvas');
+    frameCanvas.width = width;
+    frameCanvas.height = height;
+    const frameCtx = frameCanvas.getContext('2d', { willReadFrequently: true });
+    const background = figureStripBackground(stripCanvas);
+    frameCtx.fillStyle = background.color;
+    frameCtx.fillRect(0, 0, width, height);
+    // Keep the whole black frame filled with membrane background even when the
+    // foreground strip is reduced or moved. A one-pixel horizontal background
+    // profile sampled from the strip edges preserves the original left-to-right
+    // membrane variation without duplicating or stretching the protein bands.
     frameCtx.imageSmoothingEnabled = true;
     frameCtx.imageSmoothingQuality = 'high';
-    frameCtx.drawImage(backgroundLine, 0, 0, width, height);
+    frameCtx.drawImage(background.line, 0, 0, width, height);
     // Automatic 100% placement always contains the complete selected strip.
     // It leaves only a small frame inset and centers the band row. Higher zoom
     // values are an explicit manual override and may intentionally clip.
@@ -3913,6 +4055,14 @@
     };
   }
 
+  function scheduleWbFigureRender() {
+    if (figureRenderFrame) return;
+    figureRenderFrame = window.requestAnimationFrame(() => {
+      figureRenderFrame = 0;
+      renderWbFigure();
+    });
+  }
+
   function renderWbFigure(showGuides = figure.editing) {
     if (!figure.images.length) {
       drawFigureEmptyState();
@@ -3949,7 +4099,7 @@
       const bandLine = figureBandLine(candidates.length ? candidates : automaticCandidates);
       const autoAngle = autoDeskew ? bandLine.angle : 0;
       const totalAngle = autoAngle + clamp(number(entry.rotation, 0), -12, 12);
-      const strip = buildFigureStrip(entry, candidates, candidates, cropPadding, whiteBackground, totalAngle, backgroundStrength, preserveColor);
+      const strip = cachedFigureStrip(entry, candidates, candidates, cropPadding, whiteBackground, totalAngle, backgroundStrength, preserveColor);
       return { entry, index, annotations, sourceWidth, expectedCount, automaticCandidates, bandLine, candidates, totalAngle, strip };
     });
     const autoFrame = $('#figureAutoFrame').checked;
@@ -4985,13 +5135,23 @@
     $('#exportAudit').addEventListener('click', exportIntegrityReport);
     $('#saveProject').addEventListener('click', saveProject);
     $('#restoreProjectInput').addEventListener('change', event => restoreProject(event.target.files[0]));
-    $$('.module-tab').forEach(button => button.addEventListener('click', () => {
+    $$('.module-tab').forEach(button => button.addEventListener('click', async () => {
       $$('.module-tab').forEach(item => item.classList.toggle('active', item === button));
       $('#qpcrModule').classList.toggle('active-module', button.dataset.module === 'qpcr');
       $('#wbModule').classList.toggle('active-module', button.dataset.module === 'wb');
       $('#coomassieModule').classList.toggle('active-module', button.dataset.module === 'coomassie');
       $('#experimentModule').classList.toggle('active-module', button.dataset.module === 'experiment');
       if (button.dataset.module === 'coomassie') renderCoomassie();
+      if (button.dataset.module === 'experiment') {
+        try {
+          await ensureExperimentLibraryLoaded();
+        } catch (error) {
+          console.error(error);
+          const mount = $('#experimentLibraryMount');
+          if (mount) mount.innerHTML = `<div class="module-load-error"><h3>实验知识库加载失败</h3><p>${escapeHtml(error.message)}</p><button type="button" onclick="location.reload()">重新载入</button></div>`;
+          toastMessage('实验知识库加载失败，请刷新后重试。');
+        }
+      }
     }));
     $$('.wb-mode-tab').forEach(button => button.addEventListener('click', () => {
       const mode = button.dataset.wbMode;
@@ -5193,7 +5353,7 @@
           $('#figurePreserveColor').disabled = !enabled;
         }
         if (id === 'figureLaneScope') updateFigureLaneScopeUi();
-        renderWbFigure();
+        scheduleWbFigureRender();
       });
     });
     $('#figureImageSelect').addEventListener('change', event => {
@@ -5219,7 +5379,7 @@
       } else {
         figure.images[index][field] = event.target.value;
       }
-      renderWbFigure();
+      scheduleWbFigureRender();
     });
     $('#figurePanelInputs').addEventListener('change', event => {
       if (event.target.dataset.figureField === 'zoom' || event.target.dataset.figureField === 'verticalOffset') {
@@ -5269,13 +5429,14 @@
   }
 
   bindGlobalEvents();
+  initDesktopUpdate();
   resetCoomassie(false);
   renderQpcr();
   updateWb();
   renderPairResults();
   drawFigureEmptyState();
 
-  if ('serviceWorker' in navigator && location.protocol !== 'file:') {
+  if ('serviceWorker' in navigator && ['http:', 'https:'].includes(location.protocol)) {
     window.addEventListener('load', () => {
       navigator.serviceWorker.register('./service-worker.js').then(registration => {
         registration.addEventListener('updatefound', () => {

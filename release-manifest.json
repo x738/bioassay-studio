@@ -11,8 +11,8 @@
     },
     {
         "path":  "app.js",
-        "bytes":  310351,
-        "sha256":  "d5fb769d80ec53a11441211202582b5bd123c9dddb96877aa74f3f6eb7d71a89"
+        "bytes":  317372,
+        "sha256":  "a82c599cd1e33c0069cd1607f014171f068ff1423d7b75402885e020bf3a75cf"
     },
     {
         "path":  "experiment-core.js",
@@ -21,13 +21,13 @@
     },
     {
         "path":  "experiment-library.css",
-        "bytes":  29502,
-        "sha256":  "6d71a9551911e794da6bc0d0a40596396697f33023f70ddb7ada40183a8fa606"
+        "bytes":  39855,
+        "sha256":  "e10e54e0d161993974d08fabc86229841028a02b58d4e1cd202d7ab281505923"
     },
     {
         "path":  "experiment-library.js",
-        "bytes":  81194,
-        "sha256":  "41262f8ea85151fab4250ba24284d40193527cdfbe72ee980ed2fbe2438fc68e"
+        "bytes":  99776,
+        "sha256":  "09f0e9af854018d21763082f09e5ef48efcae9e2b9b461fe4166c946a35d0991"
     },
     {
         "path":  "icon.svg",
@@ -36,8 +36,8 @@
     },
     {
         "path":  "index.html",
-        "bytes":  36977,
-        "sha256":  "b35ad765e2d937888119b686ea05054c47b04ccd40e357275282acbd4f9de3ca"
+        "bytes":  36806,
+        "sha256":  "f0d8056f97815cd009024f624b4e00213a83a686613d28c7f093e31629fee9cc"
     },
     {
         "path":  "manifest.webmanifest",
@@ -47,12 +47,12 @@
     {
         "path":  "privacy.html",
         "bytes":  3361,
-        "sha256":  "7dfcec716295296d10105099fa1da59de487ba58f6218a0b171c7880701f34f2"
+        "sha256":  "1d42e4d71fe61e82d6044e15d8ae0f537ac4288c501dfe29e459c96fe0b9ea1f"
     },
     {
         "path":  "README.md",
-        "bytes":  13552,
-        "sha256":  "efe00ea21522b499141927c7bcd5f317d98cb9945596b841f5c8782d005c3b96"
+        "bytes":  14993,
+        "sha256":  "3db9f3a661803c23af571e17210aafc7713171a17786550149e27e3e979c5361"
     },
     {
         "path":  "robots.txt",
@@ -61,13 +61,13 @@
     },
     {
         "path":  "service-worker.js",
-        "bytes":  1807,
-        "sha256":  "d89971b17fe5016f6066ddee72977eca432ef4d068eb348a8951a7e0aa33a907"
+        "bytes":  1786,
+        "sha256":  "f2b6bb64769776003033fab859f0b99c667bc3ebdaef17b245df2033b82c35ae"
     },
     {
         "path":  "styles.css",
-        "bytes":  37966,
-        "sha256":  "273d6b81284f58595d4c29f21235debaada0c98601388bd01e317cdd39bad6b1"
+        "bytes":  38312,
+        "sha256":  "49c0b951e4ec8950448a153ff3039a508fc2522637980619cd54e6a579ef3319"
     },
     {
         "path":  "THIRD_PARTY_NOTICES.txt",
