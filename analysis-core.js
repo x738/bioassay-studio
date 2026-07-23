@@ -41,6 +41,62 @@
     };
   }
 
+  function filterBandGeometryOutliers(candidates, { sourceWidth = 0, sourceHeight = 0, expectedLaneCount = 0 } = {}) {
+    const input = Array.from(candidates || []);
+    // An explicit count is an experimental constraint and takes precedence.
+    // Automatic mode stays conservative and only removes a candidate when it
+    // is both far away from the robust band row and has independent evidence
+    // of being an artefact (outer-edge position, weak score or abnormal size).
+    if (Number(expectedLaneCount) > 0 || input.length < 5) return input;
+    const groups = new Map();
+    input.forEach(candidate => {
+      const key = Number.isFinite(Number(candidate.bandIndex)) ? Number(candidate.bandIndex) : 0;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(candidate);
+    });
+    const rejected = new Set();
+    groups.forEach(group => {
+      if (group.length < 5) return;
+      const points = group.map(candidate => ({
+        candidate,
+        x: Number(candidate.x) + Number(candidate.width) / 2,
+        y: Number(candidate.y) + Number(candidate.height) / 2,
+      })).filter(point => Number.isFinite(point.x) && Number.isFinite(point.y));
+      if (points.length < 5) return;
+      const slopes = [];
+      points.forEach((left, leftIndex) => points.slice(leftIndex + 1).forEach(right => {
+        const deltaX = right.x - left.x;
+        if (Math.abs(deltaX) > 2) slopes.push((right.y - left.y) / deltaX);
+      }));
+      const slope = median(slopes);
+      if (!Number.isFinite(slope)) return;
+      const intercept = median(points.map(point => point.y - slope * point.x));
+      const residuals = points.map(point => Math.abs(point.y - (slope * point.x + intercept)));
+      const residualMedian = median(residuals);
+      const residualMad = median(residuals.map(value => Math.abs(value - residualMedian)));
+      const medianHeight = median(points.map(point => Number(point.candidate.height)).filter(finitePositive));
+      const medianWidth = median(points.map(point => Number(point.candidate.width)).filter(finitePositive));
+      const medianScore = median(points.map(point => Number(point.candidate.score)).filter(Number.isFinite));
+      const residualLimit = Math.max(
+        4,
+        Number(sourceHeight) * 0.008,
+        Number.isFinite(medianHeight) ? medianHeight * 0.48 : 0,
+        residualMedian + Math.max(3, (Number.isFinite(residualMad) ? residualMad : 0) * 4),
+      );
+      points.forEach((point, index) => {
+        if (residuals[index] <= residualLimit) return;
+        const candidate = point.candidate;
+        const outerEdge = Number(sourceWidth) > 0 && (point.x < Number(sourceWidth) * 0.13 || point.x > Number(sourceWidth) * 0.87);
+        const weakScore = Number.isFinite(medianScore) && Number.isFinite(Number(candidate.score))
+          && Number(candidate.score) < medianScore * 0.72;
+        const abnormalSize = (Number.isFinite(medianHeight) && Number(candidate.height) > medianHeight * 1.85)
+          || (Number.isFinite(medianWidth) && Number(candidate.width) > medianWidth * 1.85);
+        if (outerEdge || weakScore || abnormalSize) rejected.add(candidate);
+      });
+    });
+    return input.filter(candidate => !rejected.has(candidate));
+  }
+
   function suggestedLoadVolume(currentVolume, baselineReferenceSignal, currentReferenceSignal) {
     if (![currentVolume, baselineReferenceSignal, currentReferenceSignal].every(finitePositive)) return NaN;
     return Number(currentVolume) * Number(baselineReferenceSignal) / Number(currentReferenceSignal);
@@ -351,6 +407,7 @@
     classifySaturation,
     dpiToPixelsPerMeter,
     editLaneAnnotations,
+    filterBandGeometryOutliers,
     pixelsForPhysicalWidth,
     readPngDpi,
     refineSignalBounds,

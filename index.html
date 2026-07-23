@@ -9,7 +9,7 @@
     <link rel="icon" href="icon.svg" type="image/svg+xml" />
     <link rel="manifest" href="manifest.webmanifest" />
     <title>BioAssay Studio | qPCR 与 WB 定量</title>
-    <link rel="stylesheet" href="styles.css?v=2.5.1-r36" />
+    <link rel="stylesheet" href="styles.css?v=2.5.1-r39" />
   </head>
   <body>
     <header class="app-header">
@@ -325,7 +325,7 @@
                 <button id="toggleFigureFrame" class="button button-ghost" type="button">调整黑框大小</button>
                 <span id="figureFrameSize" class="figure-guide-selection">黑框：840 × 78 px</span>
               </div>
-              <p id="figureEditHint" class="figure-edit-hint">黄线只定位泳道，不改变裁剪、缩放或条带形状；图片放大请使用每张图的“图像缩放”。</p>
+              <p id="figureEditHint" class="figure-edit-hint">手动模式中的黄线决定保留泳道；删除黄线会排除对应条带。缩放与上下位置可在每张图设置中调整。</p>
               <p id="figureStatus" class="figure-status">上传一张或多张 WB 图后开始排版。每张图的黑框尺寸固定一致。</p>
             </aside>
 
@@ -361,10 +361,10 @@
     </dialog>
 
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
-    <script src="analysis-core.js?v=2.5.1-r2"></script>
+    <script src="analysis-core.js?v=2.5.1-r3"></script>
     <script src="vendor/xlsx.full.min.js"></script>
     <script src="vendor/chart.umd.js"></script>
     <script src="vendor/UTIF.js"></script>
-    <script src="app.js?v=2.5.1-r36"></script>
+    <script src="app.js?v=2.5.1-r39"></script>
   </body>
 </html>
