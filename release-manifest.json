@@ -11,8 +11,8 @@
     },
     {
         "path":  "app.js",
-        "bytes":  265001,
-        "sha256":  "ce54204e48f0a3105b6fa3364bfd558f2deb32ea74bb54108e7857c0fb0a639a"
+        "bytes":  271328,
+        "sha256":  "743145cfcd5680d0af953ad11ad9a29318796c8435f037be5f9ae00426ce2a71"
     },
     {
         "path":  "icon.svg",
@@ -21,8 +21,8 @@
     },
     {
         "path":  "index.html",
-        "bytes":  28194,
-        "sha256":  "af425723862fbb65e9cfe63838436f8a1ac29024e9b38033664893b9442a03e3"
+        "bytes":  28687,
+        "sha256":  "3b44aa47fcc44d32605c01741a835cb8705a305b9b3af9568a12be1c169bbb11"
     },
     {
         "path":  "manifest.webmanifest",
@@ -36,8 +36,8 @@
     },
     {
         "path":  "README.md",
-        "bytes":  9498,
-        "sha256":  "0af5b8c6595adc9525aefc73ba7ca53277e07138e0a027dd5930a6adaa15273a"
+        "bytes":  9696,
+        "sha256":  "866a0a2a40ca8a55bff34baa080c958442e19cacc6452c5949ad994e63354468"
     },
     {
         "path":  "robots.txt",
@@ -47,12 +47,12 @@
     {
         "path":  "service-worker.js",
         "bytes":  1692,
-        "sha256":  "28f77833e6967d848607286be61d2f7fe076b4c35823ed9a9ab34bb5988beb5f"
+        "sha256":  "31760f3fce5efa907f44273c42066a321da574b9e51f3b0a8fce488bf6c14cae"
     },
     {
         "path":  "styles.css",
-        "bytes":  31073,
-        "sha256":  "9dc1cadba8b032de01f1b3ddf62df434abd952d8ae642eea99ec2e9c33b56a1f"
+        "bytes":  31617,
+        "sha256":  "44b155821b22b343b8d5e5e235602a69ede78ae1efd4981e963a10e1c1fe11cd"
     },
     {
         "path":  "THIRD_PARTY_NOTICES.txt",
