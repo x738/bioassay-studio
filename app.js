@@ -7,7 +7,7 @@
   const toast = $('#toast');
   const sheetDialog = $('#sheetDialog');
   const core = window.BioAssayCore;
-  const APP_VERSION = '2.5.1';
+  const APP_VERSION = '2.6.0';
   const auditLog = [];
   const history = { undo: [], redo: [], applying: false, max: 50 };
 
@@ -65,6 +65,21 @@
     selectedImageIndex: 0,
     layouts: [],
     effectiveFrame: null,
+  };
+
+  const coomassie = {
+    replicates: 3,
+    blankSubtract: true,
+    forceOrigin: false,
+    aliquotVolume: 0.1,
+    reagentVolume: 5,
+    standards: [],
+    samples: [],
+    nextStandardId: 1,
+    nextSampleId: 1,
+    fit: null,
+    blankMean: 0,
+    chart: null,
   };
 
   const foldChangeErrorBars = {
@@ -4271,6 +4286,420 @@
     toastMessage('已打开系统打印窗口，可选择“另存为 PDF”。');
   }
 
+  function coomassieStandardDefaults() {
+    const concentrations = [0, 0.1, 0.2, 0.4, 0.6, 0.8, 1];
+    const standardVolumes = [0, 0.01, 0.02, 0.04, 0.06, 0.08, 0.1];
+    return concentrations.map((concentration, index) => ({
+      id: `coomassie-standard-${coomassie.nextStandardId++}`,
+      concentration,
+      standardVolume: standardVolumes[index],
+      diluentVolume: Math.max(0, Number((0.1 - standardVolumes[index]).toFixed(3))),
+      reagentVolume: 5,
+      absorbances: ['', '', ''],
+    }));
+  }
+
+  function newCoomassieSample(name = '') {
+    return {
+      id: `coomassie-sample-${coomassie.nextSampleId++}`,
+      name: name || `样本 ${coomassie.nextSampleId - 1}`,
+      sampleVolume: coomassie.aliquotVolume,
+      reagentVolume: coomassie.reagentVolume,
+      absorbances: ['', '', ''],
+      dilution: 1,
+      extractionVolume: '',
+      sampleMass: '',
+    };
+  }
+
+  function resetCoomassie(showToast = true) {
+    if (coomassie.chart) {
+      coomassie.chart.destroy();
+      coomassie.chart = null;
+    }
+    Object.assign(coomassie, {
+      replicates: 3,
+      blankSubtract: true,
+      forceOrigin: false,
+      aliquotVolume: 0.1,
+      reagentVolume: 5,
+      standards: [],
+      samples: [],
+      nextStandardId: 1,
+      nextSampleId: 1,
+      fit: null,
+      blankMean: 0,
+    });
+    coomassie.standards = coomassieStandardDefaults();
+    coomassie.samples = [newCoomassieSample('样本 1')];
+    $('#coomassieReplicateMode').value = '3';
+    $('#coomassieAliquotVolume').value = '0.1';
+    $('#coomassieReagentVolume').value = '5';
+    $('#coomassieBlankSubtract').checked = true;
+    $('#coomassieForceOrigin').checked = false;
+    renderCoomassie();
+    if (showToast) toastMessage('已恢复文档默认方案：7 个标准点、0.1 mL 加样、5 mL G-250、3 次重复。');
+  }
+
+  function coomassieSummary(row) {
+    return core.replicateSummary((row.absorbances || []).slice(0, coomassie.replicates));
+  }
+
+  function coomassieCalculations() {
+    const standardRows = coomassie.standards.map(row => ({ row, summary: coomassieSummary(row) }));
+    const blankRows = standardRows.filter(item => number(item.row.concentration) === 0 && item.summary.n);
+    coomassie.blankMean = coomassie.blankSubtract && blankRows.length
+      ? mean(blankRows.map(item => item.summary.mean))
+      : 0;
+    const points = standardRows
+      .filter(item => Number.isFinite(number(item.row.concentration)) && item.summary.n)
+      .map(item => ({ x: number(item.row.concentration), y: item.summary.mean - coomassie.blankMean }));
+    coomassie.fit = core.linearRegression(points, { forceOrigin: coomassie.forceOrigin });
+    const xValues = points.map(point => point.x);
+    const standardMin = xValues.length ? Math.min(...xValues) : NaN;
+    const standardMax = xValues.length ? Math.max(...xValues) : NaN;
+    const sampleResults = coomassie.samples.map(row => ({
+      row,
+      result: core.coomassieSampleResult({
+        absorbances: (row.absorbances || []).slice(0, coomassie.replicates),
+        blankAbsorbance: coomassie.blankMean,
+        slope: coomassie.fit.slope,
+        intercept: coomassie.fit.intercept,
+        dilution: row.dilution,
+        extractionVolume: row.extractionVolume,
+        sampleMass: row.sampleMass,
+      }),
+    }));
+    return { standardRows, points, sampleResults, standardMin, standardMax };
+  }
+
+  function coomassieFitStatus(fit = coomassie.fit) {
+    if (!fit || fit.n < 2 || !Number.isFinite(fit.slope) || fit.slope <= 0 || !Number.isFinite(fit.r2)) {
+      return { severity: 'neutral', badge: '待计算', advice: '请至少填写 2 个不同浓度且吸光度有效的标准点。' };
+    }
+    if (fit.r2 >= 0.99) return { severity: 'good', badge: '建议合格', advice: 'R² ≥ 0.990，线性拟合达到本工具的建议标准。仍请结合实验记录复核标准点。' };
+    if (fit.r2 >= 0.98) return { severity: 'warn', badge: '建议复核', advice: 'R² 为 0.980–0.9899：可继续计算，但建议检查移液、混匀、空白和偏离趋势的标准点。' };
+    return { severity: 'bad', badge: '建议重做', advice: 'R² < 0.980：建议排查异常标准点或重新制备标准曲线。当前结果仍可查看和导出。' };
+  }
+
+  function coomassieRepeatQc(summary) {
+    if (!summary.n) return { severity: 'neutral', text: '待录入' };
+    if (coomassie.replicates === 3 && summary.n < 3) return { severity: 'warn', text: `仅 ${summary.n}/3` };
+    if (coomassie.replicates === 3 && summary.cv > 15) return { severity: 'bad', text: `CV ${fmt(summary.cv, 1)}%` };
+    if (coomassie.replicates === 3 && summary.cv > 10) return { severity: 'warn', text: `CV ${fmt(summary.cv, 1)}%` };
+    return { severity: 'good', text: coomassie.replicates === 3 ? '重复良好' : '已录入' };
+  }
+
+  function coomassieSampleQc(result, standardMin, standardMax) {
+    const repeatQc = coomassieRepeatQc(result);
+    if (!result.n) return repeatQc;
+    if (!coomassie.fit || coomassie.fit.n < 2 || !Number.isFinite(result.measuredConcentration)) return { severity: 'neutral', text: '等待曲线' };
+    if (result.adjustedAbsorbance < 0 || result.measuredConcentration < 0) return { severity: 'bad', text: '低于空白' };
+    if (Number.isFinite(standardMin) && Number.isFinite(standardMax) && (result.measuredConcentration < standardMin || result.measuredConcentration > standardMax)) {
+      return { severity: 'warn', text: '超标准范围' };
+    }
+    if (repeatQc.severity !== 'good') return repeatQc;
+    return { severity: 'good', text: '范围内' };
+  }
+
+  function coomassieAbsorbanceHeaders() {
+    return Array.from({ length: coomassie.replicates }, (_, index) => `<th>A595-${index + 1}</th>`).join('');
+  }
+
+  function dilutionOptions(selected) {
+    return Array.from({ length: 100 }, (_, index) => {
+      const value = index + 1;
+      return `<option value="${value}" ${number(selected, 1) === value ? 'selected' : ''}>${value}×</option>`;
+    }).join('');
+  }
+
+  function renderCoomassieStandards(calculations) {
+    $('#coomassieStandardHead').innerHTML = `<tr><th>标准点</th><th>浓度 (mg/mL)</th><th>标准液 (mL)</th><th>稀释液 (mL)</th><th>G-250 (mL)</th>${coomassieAbsorbanceHeaders()}<th>平均 A595</th><th>SD</th><th>CV</th><th>建议</th><th></th></tr>`;
+    $('#coomassieStandardBody').innerHTML = calculations.standardRows.map((item, index) => {
+      const { row, summary } = item;
+      const qc = coomassieRepeatQc(summary);
+      const absorbanceInputs = Array.from({ length: coomassie.replicates }, (_, replicateIndex) => `<td><input class="compact-input" data-coomassie-standard="${row.id}" data-field="absorbance" data-replicate="${replicateIndex}" type="number" step="0.001" min="0" value="${escapeHtml(row.absorbances?.[replicateIndex] ?? '')}" aria-label="标准点 ${index + 1} A595 重复 ${replicateIndex + 1}" /></td>`).join('');
+      return `<tr class="${qc.severity === 'bad' ? 'row-bad' : qc.severity === 'warn' ? 'row-warning' : ''}">
+        <td class="result-number">${index + 1}</td>
+        <td><input class="compact-input" data-coomassie-standard="${row.id}" data-field="concentration" type="number" step="0.001" min="0" value="${escapeHtml(row.concentration)}" /></td>
+        <td><input class="compact-input" data-coomassie-standard="${row.id}" data-field="standardVolume" type="number" step="0.001" min="0" value="${escapeHtml(row.standardVolume)}" /></td>
+        <td><input class="compact-input" data-coomassie-standard="${row.id}" data-field="diluentVolume" type="number" step="0.001" min="0" value="${escapeHtml(row.diluentVolume)}" /></td>
+        <td><input class="compact-input" data-coomassie-standard="${row.id}" data-field="reagentVolume" type="number" step="0.01" min="0" value="${escapeHtml(row.reagentVolume)}" /></td>
+        ${absorbanceInputs}
+        <td class="result-number">${fmt(summary.mean, 4)}</td><td class="result-number">${summary.n > 1 ? fmt(summary.sd, 4) : '—'}</td>
+        <td class="result-number">${summary.n > 1 ? `${fmt(summary.cv, 1)}%` : '—'}</td>
+        <td><span class="coomassie-qc ${qc.severity}">${escapeHtml(qc.text)}</span></td>
+        <td><button class="coomassie-remove" data-remove-coomassie-standard="${row.id}" type="button" title="删除标准点">×</button></td>
+      </tr>`;
+    }).join('');
+  }
+
+  function renderCoomassieSamples(calculations) {
+    $('#coomassieSampleHead').innerHTML = `<tr><th>样本名称</th><th>样本液 (mL)</th><th>G-250 (mL)</th>${coomassieAbsorbanceHeaders()}<th>稀释</th><th>提取总体积 (mL)</th><th>样品质量 (g)</th><th>平均 A595</th><th>测定液 (mg/mL)</th><th>原液 (mg/mL)</th><th>蛋白含量 (mg/g)</th><th>建议</th><th></th></tr>`;
+    $('#coomassieSampleBody').innerHTML = calculations.sampleResults.map(({ row, result }, index) => {
+      const qc = coomassieSampleQc(result, calculations.standardMin, calculations.standardMax);
+      const absorbanceInputs = Array.from({ length: coomassie.replicates }, (_, replicateIndex) => `<td><input class="compact-input" data-coomassie-sample="${row.id}" data-field="absorbance" data-replicate="${replicateIndex}" type="number" step="0.001" min="0" value="${escapeHtml(row.absorbances?.[replicateIndex] ?? '')}" aria-label="${escapeHtml(row.name)} A595 重复 ${replicateIndex + 1}" /></td>`).join('');
+      return `<tr class="${qc.severity === 'bad' ? 'row-bad' : qc.severity === 'warn' ? 'row-warning' : ''}">
+        <td><input class="name-input" data-coomassie-sample="${row.id}" data-field="name" value="${escapeHtml(row.name)}" aria-label="样本 ${index + 1} 名称" /></td>
+        <td><input class="compact-input" data-coomassie-sample="${row.id}" data-field="sampleVolume" type="number" step="0.001" min="0" value="${escapeHtml(row.sampleVolume)}" /></td>
+        <td><input class="compact-input" data-coomassie-sample="${row.id}" data-field="reagentVolume" type="number" step="0.01" min="0" value="${escapeHtml(row.reagentVolume)}" /></td>
+        ${absorbanceInputs}
+        <td><select class="compact-input" data-coomassie-sample="${row.id}" data-field="dilution">${dilutionOptions(row.dilution)}</select></td>
+        <td><input class="compact-input" data-coomassie-sample="${row.id}" data-field="extractionVolume" type="number" step="0.01" min="0" value="${escapeHtml(row.extractionVolume)}" /></td>
+        <td><input class="compact-input" data-coomassie-sample="${row.id}" data-field="sampleMass" type="number" step="0.001" min="0" value="${escapeHtml(row.sampleMass)}" /></td>
+        <td class="result-number">${fmt(result.mean, 4)}</td><td class="result-number">${fmt(result.measuredConcentration, 4)}</td>
+        <td class="result-number">${fmt(result.originalConcentration, 4)}</td><td class="result-number">${fmt(result.proteinContent, 4)}</td>
+        <td><span class="coomassie-qc ${qc.severity}">${escapeHtml(qc.text)}</span></td>
+        <td><button class="coomassie-remove" data-remove-coomassie-sample="${row.id}" type="button" title="删除样本">×</button></td>
+      </tr>`;
+    }).join('');
+  }
+
+  function renderCoomassieChart(points, fit) {
+    const canvasElement = $('#coomassieChart');
+    if (!canvasElement || !window.Chart) return;
+    if (coomassie.chart) {
+      coomassie.chart.destroy();
+      coomassie.chart = null;
+    }
+    if (!fit || fit.n < 2 || !Number.isFinite(fit.slope)) return;
+    const sorted = points.slice().sort((a, b) => a.x - b.x);
+    const xMin = Math.min(...sorted.map(point => point.x));
+    const xMax = Math.max(...sorted.map(point => point.x));
+    const line = [{ x: xMin, y: fit.slope * xMin + fit.intercept }, { x: xMax, y: fit.slope * xMax + fit.intercept }];
+    coomassie.chart = new Chart(canvasElement, {
+      type: 'scatter',
+      data: {
+        datasets: [
+          { label: '标准点', data: sorted, pointRadius: 5, pointHoverRadius: 7, backgroundColor: '#16868b', borderColor: '#16868b' },
+          { label: '线性拟合', type: 'line', data: line, pointRadius: 0, borderWidth: 2, borderColor: '#2f6fec', backgroundColor: '#2f6fec', tension: 0 },
+        ],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        animation: false,
+        parsing: false,
+        plugins: { legend: { position: 'bottom' }, tooltip: { callbacks: { label: context => `${context.dataset.label}: (${fmt(context.parsed.x, 3)}, ${fmt(context.parsed.y, 4)})` } } },
+        scales: {
+          x: { title: { display: true, text: '蛋白浓度 (mg/mL)' }, beginAtZero: true, grid: { color: '#edf1f4' } },
+          y: { title: { display: true, text: coomassie.blankSubtract ? '扣空白 A595' : 'A595' }, beginAtZero: true, grid: { color: '#edf1f4' } },
+        },
+      },
+    });
+  }
+
+  function renderCoomassie() {
+    if (!$('#coomassieModule')) return;
+    const calculations = coomassieCalculations();
+    renderCoomassieStandards(calculations);
+    renderCoomassieSamples(calculations);
+    const fit = coomassie.fit;
+    const fitStatus = coomassieFitStatus(fit);
+    $('#coomassieR2').textContent = fmt(fit?.r2, 4);
+    $('#coomassieSlope').textContent = fmt(fit?.slope, 4);
+    $('#coomassiePointCount').textContent = String(fit?.n || 0);
+    $('#coomassieBlank').textContent = fmt(coomassie.blankMean, 4);
+    $('#coomassieFitBadge').textContent = fitStatus.badge;
+    $('#coomassieFitBadge').className = `fit-badge ${fitStatus.severity}`;
+    $('#coomassieFitAdvice').textContent = fitStatus.advice;
+    $('#coomassieFitAdvice').className = `fit-advice ${fitStatus.severity}`;
+    const sign = number(fit?.intercept, 0) >= 0 ? '+' : '−';
+    $('#coomassieEquation').textContent = fit?.n >= 2 && Number.isFinite(fit.slope)
+      ? `A595 = ${fmt(fit.slope, 5)} × C ${sign} ${fmt(Math.abs(fit.intercept), 5)}；R² = ${fmt(fit.r2, 4)}${coomassie.blankSubtract ? '（已扣空白）' : ''}`
+      : '填写至少 2 个有效标准点后自动拟合。';
+    if ($('#coomassieModule').classList.contains('active-module')) setTimeout(() => renderCoomassieChart(calculations.points, fit), 0);
+  }
+
+  function parsePastedGrid(text) {
+    return String(text || '').replace(/\r/g, '').split('\n').map(line => line.trim()).filter(Boolean).map(line => {
+      const cells = line.includes('\t') ? line.split('\t') : line.split(/[，,]/);
+      return cells.map(cell => cell.trim());
+    }).filter(row => row.some(cell => cell !== ''));
+  }
+
+  function looksLikeHeader(row) {
+    return (row || []).some(cell => /浓度|标准|吸光|a595|样本|稀释|体积|质量/i.test(String(cell)));
+  }
+
+  function headerColumnIndex(header, matcher, fallback = -1) {
+    if (!header) return fallback;
+    const index = header.findIndex(cell => matcher(String(cell).trim().toLowerCase()));
+    return index >= 0 ? index : fallback;
+  }
+
+  function importCoomassieStandards() {
+    let rows = parsePastedGrid($('#coomassieStandardPaste').value);
+    const header = rows.length && looksLikeHeader(rows[0]) ? rows.shift() : null;
+    const concentrationIndex = headerColumnIndex(header, cell => cell.includes('浓度') && !/吸光|a595/.test(cell), 0);
+    const standardVolumeIndex = headerColumnIndex(header, cell => (cell.includes('标准') || cell.includes('蛋白')) && /体积|ml/.test(cell), 1);
+    const diluentVolumeIndex = headerColumnIndex(header, cell => /稀释液|提取液|缓冲液/.test(cell), 2);
+    const reagentVolumeIndex = headerColumnIndex(header, cell => /g-?250|考马斯/.test(cell), -1);
+    const absorbanceIndexes = header
+      ? header.map((cell, index) => (/a595|吸光/.test(String(cell).toLowerCase()) ? index : -1)).filter(index => index >= 0)
+      : [3, 4, 5];
+    const imported = rows.map(cells => {
+      const concentration = number(cells[concentrationIndex]);
+      const standardVolume = number(cells[standardVolumeIndex]);
+      const diluentVolume = number(cells[diluentVolumeIndex]);
+      if (![concentration, standardVolume, diluentVolume].every(Number.isFinite)) return null;
+      return {
+        id: `coomassie-standard-${coomassie.nextStandardId++}`,
+        concentration,
+        standardVolume,
+        diluentVolume,
+        reagentVolume: reagentVolumeIndex >= 0 ? number(cells[reagentVolumeIndex], coomassie.reagentVolume) : coomassie.reagentVolume,
+        absorbances: Array.from({ length: 3 }, (_, index) => cells[absorbanceIndexes[index]] ?? ''),
+      };
+    }).filter(Boolean);
+    if (imported.length < 2) return toastMessage('未识别到足够的标准点；请按“浓度、标准液、稀释液、A595”列粘贴。');
+    coomassie.standards = imported;
+    recordAudit('coomassie-standards-pasted', { rows: imported.length, replicates: coomassie.replicates });
+    renderCoomassie();
+    toastMessage(`已从表格导入 ${imported.length} 个标准点。`);
+  }
+
+  function importCoomassieSamples() {
+    let rows = parsePastedGrid($('#coomassieSamplePaste').value);
+    const header = rows.length && looksLikeHeader(rows[0]) ? rows.shift() : null;
+    const replicateCount = coomassie.replicates;
+    const nameIndex = headerColumnIndex(header, cell => /样本|sample|名称/.test(cell), 0);
+    const absorbanceIndexes = header
+      ? header.map((cell, index) => (/a595|吸光/.test(String(cell).toLowerCase()) ? index : -1)).filter(index => index >= 0)
+      : Array.from({ length: replicateCount }, (_, index) => 1 + index);
+    const metadataStart = 1 + replicateCount;
+    const dilutionIndex = headerColumnIndex(header, cell => /稀释倍|dilution/.test(cell), metadataStart);
+    const extractionVolumeIndex = headerColumnIndex(header, cell => /提取.*体积|总体积|extraction/.test(cell), metadataStart + 1);
+    const sampleMassIndex = headerColumnIndex(header, cell => /样品.*质量|样本.*质量|重量|mass/.test(cell), metadataStart + 2);
+    const imported = rows.map((cells, index) => {
+      if (!cells[nameIndex]) return null;
+      return {
+        id: `coomassie-sample-${coomassie.nextSampleId++}`,
+        name: cells[nameIndex] || `样本 ${index + 1}`,
+        sampleVolume: coomassie.aliquotVolume,
+        reagentVolume: coomassie.reagentVolume,
+        absorbances: Array.from({ length: 3 }, (_, replicateIndex) => cells[absorbanceIndexes[replicateIndex]] ?? ''),
+        dilution: clamp(Math.round(number(cells[dilutionIndex], 1)), 1, 100),
+        extractionVolume: cells[extractionVolumeIndex] ?? '',
+        sampleMass: cells[sampleMassIndex] ?? '',
+      };
+    }).filter(Boolean);
+    if (!imported.length) return toastMessage('未识别到样本行；请确认第一列为样本名称。');
+    coomassie.samples = imported;
+    recordAudit('coomassie-samples-pasted', { rows: imported.length, replicates: coomassie.replicates });
+    renderCoomassie();
+    toastMessage(`已从表格导入 ${imported.length} 个样本。`);
+  }
+
+  function exportCoomassieCsv() {
+    const calculations = coomassieCalculations();
+    const fitStatus = coomassieFitStatus(coomassie.fit);
+    const lines = [
+      ['考马斯亮蓝蛋白浓度测定', 'A595'],
+      ['回归方程斜率', fmt(coomassie.fit?.slope, 8)],
+      ['回归方程截距', fmt(coomassie.fit?.intercept, 8)],
+      ['R平方', fmt(coomassie.fit?.r2, 6)],
+      ['曲线建议', fitStatus.badge, fitStatus.advice],
+      ['是否扣空白', coomassie.blankSubtract ? '是' : '否'],
+      ['空白A595', fmt(coomassie.blankMean, 6)],
+      ['是否强制过原点', coomassie.forceOrigin ? '是' : '否'],
+      [],
+      ['标准品'],
+      ['标准点', '浓度(mg/mL)', '标准液(mL)', '稀释液(mL)', 'G-250(mL)', 'A595-1', 'A595-2', 'A595-3', '平均A595', 'SD', 'CV(%)', 'QC'],
+      ...calculations.standardRows.map(({ row, summary }, index) => {
+        const qc = coomassieRepeatQc(summary);
+        return [index + 1, row.concentration, row.standardVolume, row.diluentVolume, row.reagentVolume, ...(row.absorbances || []).slice(0, 3), fmt(summary.mean, 6), fmt(summary.sd, 6), fmt(summary.cv, 3), qc.text];
+      }),
+      [],
+      ['样本结果'],
+      ['样本', '样本液(mL)', 'G-250(mL)', 'A595-1', 'A595-2', 'A595-3', '平均A595', 'SD', 'CV(%)', '稀释倍数', '提取总体积(mL)', '样品质量(g)', '测定液浓度(mg/mL)', '原液浓度(mg/mL)', '蛋白含量(mg/g)', 'QC'],
+      ...calculations.sampleResults.map(({ row, result }) => {
+        const qc = coomassieSampleQc(result, calculations.standardMin, calculations.standardMax);
+        return [row.name, row.sampleVolume, row.reagentVolume, ...(row.absorbances || []).slice(0, 3), fmt(result.mean, 6), fmt(result.sd, 6), fmt(result.cv, 3), row.dilution, row.extractionVolume, row.sampleMass, fmt(result.measuredConcentration, 6), fmt(result.originalConcentration, 6), fmt(result.proteinContent, 6), qc.text];
+      }),
+    ];
+    downloadText(`coomassie-protein-assay-${new Date().toISOString().slice(0, 10)}.csv`, lines.map(row => row.map(csvCell).join(',')).join('\n'));
+    recordAudit('coomassie-csv-exported', { standards: coomassie.standards.length, samples: coomassie.samples.length, r2: coomassie.fit?.r2 });
+    toastMessage('考马斯亮蓝标准曲线与样本结果已开始导出。');
+  }
+
+  function bindCoomassieEvents() {
+    $('#resetCoomassie').addEventListener('click', () => resetCoomassie(true));
+    $('#coomassieReplicateMode').addEventListener('change', event => {
+      coomassie.replicates = event.target.value === '1' ? 1 : 3;
+      renderCoomassie();
+    });
+    $('#coomassieAliquotVolume').addEventListener('change', event => {
+      coomassie.aliquotVolume = Math.max(0.001, number(event.target.value, 0.1));
+      event.target.value = coomassie.aliquotVolume;
+    });
+    $('#coomassieReagentVolume').addEventListener('change', event => {
+      coomassie.reagentVolume = Math.max(0.01, number(event.target.value, 5));
+      event.target.value = coomassie.reagentVolume;
+    });
+    $('#coomassieBlankSubtract').addEventListener('change', event => { coomassie.blankSubtract = event.target.checked; renderCoomassie(); });
+    $('#coomassieForceOrigin').addEventListener('change', event => { coomassie.forceOrigin = event.target.checked; renderCoomassie(); });
+    $('#addCoomassieStandard').addEventListener('click', () => {
+      const lastConcentration = Math.max(0, ...coomassie.standards.map(row => number(row.concentration, 0)));
+      coomassie.standards.push({
+        id: `coomassie-standard-${coomassie.nextStandardId++}`,
+        concentration: Number((lastConcentration + 0.2).toFixed(3)),
+        standardVolume: coomassie.aliquotVolume,
+        diluentVolume: 0,
+        reagentVolume: coomassie.reagentVolume,
+        absorbances: ['', '', ''],
+      });
+      renderCoomassie();
+    });
+    $('#balanceCoomassieVolumes').addEventListener('click', () => {
+      coomassie.standards.forEach(row => { row.diluentVolume = Math.max(0, Number((coomassie.aliquotVolume - number(row.standardVolume, 0)).toFixed(4))); });
+      renderCoomassie();
+      toastMessage(`已按 ${coomassie.aliquotVolume} mL 总标准液体积补足稀释液。`);
+    });
+    $('#addCoomassieSample').addEventListener('click', () => { coomassie.samples.push(newCoomassieSample()); renderCoomassie(); });
+    $('#importCoomassieStandards').addEventListener('click', importCoomassieStandards);
+    $('#importCoomassieSamples').addEventListener('click', importCoomassieSamples);
+    $('#exportCoomassieCsv').addEventListener('click', exportCoomassieCsv);
+    $('#coomassieStandardBody').addEventListener('change', event => {
+      const id = event.target.dataset.coomassieStandard;
+      const row = coomassie.standards.find(item => item.id === id);
+      if (!row) return;
+      if (event.target.dataset.field === 'absorbance') {
+        row.absorbances[Number(event.target.dataset.replicate)] = event.target.value;
+      } else if (event.target.dataset.field) {
+        row[event.target.dataset.field] = event.target.value === '' ? '' : number(event.target.value, 0);
+      }
+      renderCoomassie();
+    });
+    $('#coomassieStandardBody').addEventListener('click', event => {
+      const id = event.target.closest('[data-remove-coomassie-standard]')?.dataset.removeCoomassieStandard;
+      if (!id) return;
+      if (coomassie.standards.length <= 2) return toastMessage('标准曲线至少保留 2 个标准点。');
+      coomassie.standards = coomassie.standards.filter(row => row.id !== id);
+      renderCoomassie();
+    });
+    $('#coomassieSampleBody').addEventListener('change', event => {
+      const id = event.target.dataset.coomassieSample;
+      const row = coomassie.samples.find(item => item.id === id);
+      if (!row) return;
+      if (event.target.dataset.field === 'absorbance') {
+        row.absorbances[Number(event.target.dataset.replicate)] = event.target.value;
+      } else if (event.target.dataset.field === 'name') {
+        row.name = event.target.value;
+      } else if (event.target.dataset.field) {
+        row[event.target.dataset.field] = event.target.value === '' ? '' : number(event.target.value, 0);
+      }
+      renderCoomassie();
+    });
+    $('#coomassieSampleBody').addEventListener('click', event => {
+      const id = event.target.closest('[data-remove-coomassie-sample]')?.dataset.removeCoomassieSample;
+      if (!id) return;
+      coomassie.samples = coomassie.samples.filter(row => row.id !== id);
+      if (!coomassie.samples.length) coomassie.samples.push(newCoomassieSample('样本 1'));
+      renderCoomassie();
+    });
+  }
+
   const projectControlIds = [
     'invertIntensity', 'autoSensitivity', 'autoMaxBands', 'autoLaneCount', 'autoMarkerPercent', 'autoEdgePadding', 'autoBandsPerLane', 'autoBandGap', 'autoBackground', 'wbAutoExcludeBad', 'backgroundMode',
     'roiType', 'roiName', 'roiGroup', 'pairAutoBackground', 'pairSensitivity', 'pairLaneCount', 'pairMarkerPercent', 'pairEdgePadding', 'pairDefaultLoadVolume', 'pairAllowSaturatedCalibration',
@@ -4381,6 +4810,17 @@
           manualCenters: entry.manualCenters,
         })),
       },
+      coomassie: {
+        replicates: coomassie.replicates,
+        blankSubtract: coomassie.blankSubtract,
+        forceOrigin: coomassie.forceOrigin,
+        aliquotVolume: coomassie.aliquotVolume,
+        reagentVolume: coomassie.reagentVolume,
+        standards: coomassie.standards,
+        samples: coomassie.samples,
+        nextStandardId: coomassie.nextStandardId,
+        nextSampleId: coomassie.nextSampleId,
+      },
     };
     const timestamp = project.createdAt.slice(0, 19).replaceAll(':', '-');
     const blob = new Blob([JSON.stringify(project)], { type: 'application/json;charset=utf-8' });
@@ -4416,6 +4856,30 @@
         pendingWorkbook: null,
       });
       applyProjectControls(project.controls || {});
+
+      const savedCoomassie = project.coomassie || {};
+      if (coomassie.chart) {
+        coomassie.chart.destroy();
+        coomassie.chart = null;
+      }
+      coomassie.replicates = savedCoomassie.replicates === 1 ? 1 : 3;
+      coomassie.blankSubtract = savedCoomassie.blankSubtract !== false;
+      coomassie.forceOrigin = Boolean(savedCoomassie.forceOrigin);
+      coomassie.aliquotVolume = Math.max(0.001, number(savedCoomassie.aliquotVolume, 0.1));
+      coomassie.reagentVolume = Math.max(0.01, number(savedCoomassie.reagentVolume, 5));
+      coomassie.nextStandardId = Math.max(1, Math.round(number(savedCoomassie.nextStandardId, 1)));
+      coomassie.nextSampleId = Math.max(1, Math.round(number(savedCoomassie.nextSampleId, 1)));
+      coomassie.standards = Array.isArray(savedCoomassie.standards) && savedCoomassie.standards.length >= 2
+        ? savedCoomassie.standards.map(row => ({ ...row, absorbances: Array.isArray(row.absorbances) ? [...row.absorbances, '', '', ''].slice(0, 3) : ['', '', ''] }))
+        : coomassieStandardDefaults();
+      coomassie.samples = Array.isArray(savedCoomassie.samples) && savedCoomassie.samples.length
+        ? savedCoomassie.samples.map(row => ({ ...row, absorbances: Array.isArray(row.absorbances) ? [...row.absorbances, '', '', ''].slice(0, 3) : ['', '', ''] }))
+        : [newCoomassieSample('样本 1')];
+      $('#coomassieReplicateMode').value = String(coomassie.replicates);
+      $('#coomassieAliquotVolume').value = coomassie.aliquotVolume;
+      $('#coomassieReagentVolume').value = coomassie.reagentVolume;
+      $('#coomassieBlankSubtract').checked = coomassie.blankSubtract;
+      $('#coomassieForceOrigin').checked = coomassie.forceOrigin;
 
       const savedWb = project.wb || {};
       wb.image = await imageFromSource(savedWb.imageSource);
@@ -4499,8 +4963,10 @@
       updateWb();
       renderPairResults();
       renderFigurePanelInputs();
+      renderCoomassie();
       if (figure.images.length) renderWbFigure(); else drawFigureEmptyState();
-      const moduleButton = $(`.module-tab[data-module="${project.activeModule === 'wb' ? 'wb' : 'qpcr'}"]`);
+      const activeModule = ['qpcr', 'wb', 'coomassie'].includes(project.activeModule) ? project.activeModule : 'qpcr';
+      const moduleButton = $(`.module-tab[data-module="${activeModule}"]`);
       moduleButton?.click();
       const wbMode = ['single', 'pair', 'figure'].includes(project.activeWbMode) ? project.activeWbMode : 'single';
       $(`.wb-mode-tab[data-wb-mode="${wbMode}"]`)?.click();
@@ -4523,6 +4989,8 @@
       $$('.module-tab').forEach(item => item.classList.toggle('active', item === button));
       $('#qpcrModule').classList.toggle('active-module', button.dataset.module === 'qpcr');
       $('#wbModule').classList.toggle('active-module', button.dataset.module === 'wb');
+      $('#coomassieModule').classList.toggle('active-module', button.dataset.module === 'coomassie');
+      if (button.dataset.module === 'coomassie') renderCoomassie();
     }));
     $$('.wb-mode-tab').forEach(button => button.addEventListener('click', () => {
       const mode = button.dataset.wbMode;
@@ -4790,6 +5258,7 @@
     bindPairCanvas(pair.reference);
     bindPairCanvas(pair.target);
     bindFigureCanvas();
+    bindCoomassieEvents();
     document.addEventListener('keydown', event => {
       const editable = event.target.matches('input, textarea, select, [contenteditable="true"]');
       if (editable || !(event.ctrlKey || event.metaKey)) return;
@@ -4799,6 +5268,7 @@
   }
 
   bindGlobalEvents();
+  resetCoomassie(false);
   renderQpcr();
   updateWb();
   renderPairResults();

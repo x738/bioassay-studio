@@ -3,13 +3,13 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="description" content="在浏览器本地完成 qPCR ΔΔCt 计算与 Western blot 灰度定量。" />
+    <meta name="description" content="在浏览器本地完成 qPCR ΔΔCt、Western blot 灰度与考马斯亮蓝蛋白浓度定量。" />
     <meta name="theme-color" content="#142342" />
     <meta name="referrer" content="no-referrer" />
     <link rel="icon" href="icon.svg" type="image/svg+xml" />
     <link rel="manifest" href="manifest.webmanifest" />
-    <title>BioAssay Studio | qPCR 与 WB 定量</title>
-    <link rel="stylesheet" href="styles.css?v=2.5.1-r39" />
+    <title>BioAssay Studio | qPCR、WB 与蛋白浓度定量</title>
+    <link rel="stylesheet" href="styles.css?v=2.6.0-r2" />
   </head>
   <body>
     <header class="app-header">
@@ -33,6 +33,7 @@
     <nav class="module-tabs" aria-label="分析模块">
       <button class="module-tab active" data-module="qpcr">qPCR ΔΔCt 分析</button>
       <button class="module-tab" data-module="wb">WB 灰度分析</button>
+      <button class="module-tab" data-module="coomassie">考马斯亮蓝蛋白定量</button>
     </nav>
 
     <main>
@@ -345,10 +346,111 @@
           <p class="figure-hint">说明：泳道名称不是 OCR 识别，而是按你输入的顺序映射至图像中由左到右识别到的主条带；若自动结果与实验泳道不符，请先回到“单图 ROI 定量”确认条带。</p>
         </div>
       </section>
+
+      <section id="coomassieModule" class="module" aria-labelledby="coomassieTitle">
+        <div class="module-intro coomassie-intro">
+          <div>
+            <p class="kicker">COOMASSIE ASSAY · A595</p>
+            <h2 id="coomassieTitle">考马斯亮蓝蛋白浓度测定</h2>
+            <p>录入或粘贴标准品与样本吸光度，自动拟合标准曲线、评估 R²，并换算原液浓度和蛋白含量。</p>
+          </div>
+          <button id="resetCoomassie" class="button button-secondary" type="button">恢复王浩方法默认值</button>
+        </div>
+
+        <div class="coomassie-method-banner">
+          <div><span>文档默认反应</span><strong>0.1 mL 标准品/样本 + 5.0 mL G-250</strong></div>
+          <div><span>检测条件</span><strong>避光 5–20 min · A595</strong></div>
+          <div><span>推荐线性范围</span><strong>0–1.0 mg/mL（可自定义）</strong></div>
+          <div><span>最终蛋白含量</span><strong>浓度 × 提取总体积 ÷ 样品质量</strong></div>
+        </div>
+
+        <section class="surface coomassie-workspace">
+          <div class="coomassie-toolbar">
+            <label>重复方式
+              <select id="coomassieReplicateMode">
+                <option value="1">无重复</option>
+                <option value="3" selected>3 次重复</option>
+              </select>
+            </label>
+            <label>标准/样本加入体积（mL）
+              <input id="coomassieAliquotVolume" type="number" min="0.001" max="10" step="0.001" value="0.1" />
+            </label>
+            <label>显色液体积（mL）
+              <input id="coomassieReagentVolume" type="number" min="0.01" max="100" step="0.01" value="5" />
+            </label>
+            <label class="checkbox-row coomassie-check"><input id="coomassieBlankSubtract" type="checkbox" checked />扣除 0 浓度空白</label>
+            <label class="checkbox-row coomassie-check"><input id="coomassieForceOrigin" type="checkbox" />回归强制过原点（可选）</label>
+          </div>
+          <p class="coomassie-method-note">R² 仅作为实验质量建议，不阻止计算：≥0.990 建议合格；0.980–0.9899 建议复核；&lt;0.980 建议排查标准点或重做。强制过原点不是默认要求，应结合实验方案选择。</p>
+
+          <div class="coomassie-section-heading">
+            <div><span class="coomassie-step">1</span><div><h3>建立标准曲线</h3><p>浓度、标准液/稀释液体积和吸光度均可直接修改。</p></div></div>
+            <div class="actions-group">
+              <button id="balanceCoomassieVolumes" class="button button-ghost" type="button">稀释液补足至设定体积</button>
+              <button id="addCoomassieStandard" class="button button-secondary" type="button">＋ 标准点</button>
+            </div>
+          </div>
+          <details class="coomassie-paste-card">
+            <summary>从 Excel / WPS 粘贴标准品表格</summary>
+            <p>推荐列顺序：浓度、标准液体积、稀释液体积、A595-1、A595-2、A595-3。可含表头；无重复时只读取第一列 A595。</p>
+            <textarea id="coomassieStandardPaste" rows="5" placeholder="浓度	标准液mL	稀释液mL	A595-1	A595-2	A595-3&#10;0	0	0.1	0.020	0.021	0.019"></textarea>
+            <button id="importCoomassieStandards" class="button button-secondary" type="button">解析并替换标准品</button>
+          </details>
+          <div class="table-wrap coomassie-table-wrap">
+            <table class="coomassie-table">
+              <thead id="coomassieStandardHead"></thead>
+              <tbody id="coomassieStandardBody"></tbody>
+            </table>
+          </div>
+
+          <div class="coomassie-curve-layout">
+            <article class="coomassie-chart-card">
+              <div class="coomassie-card-title"><div><h3>标准曲线</h3><p id="coomassieEquation">填写至少 2 个有效标准点后自动拟合。</p></div><span id="coomassieFitBadge" class="fit-badge neutral">待计算</span></div>
+              <div class="coomassie-chart-wrap"><canvas id="coomassieChart" aria-label="考马斯亮蓝标准曲线"></canvas></div>
+            </article>
+            <aside class="coomassie-qc-card">
+              <h3>曲线质量建议</h3>
+              <div class="coomassie-metrics">
+                <div><span>R²</span><strong id="coomassieR2">—</strong></div>
+                <div><span>斜率</span><strong id="coomassieSlope">—</strong></div>
+                <div><span>标准点</span><strong id="coomassiePointCount">0</strong></div>
+                <div><span>空白 A595</span><strong id="coomassieBlank">—</strong></div>
+              </div>
+              <div id="coomassieFitAdvice" class="fit-advice neutral">请录入标准品吸光度。</div>
+              <p>这是统计建议，不会自动删除标准点，也不会阻止样本换算。若重复 CV 较大，请先核对移液、混匀和读数。</p>
+            </aside>
+          </div>
+
+          <div class="coomassie-section-heading sample-heading">
+            <div><span class="coomassie-step">2</span><div><h3>样本与最终浓度</h3><p>可手动逐行输入，也可直接粘贴表格；稀释倍数可选 1–100×。</p></div></div>
+            <button id="addCoomassieSample" class="button button-secondary" type="button">＋ 样本</button>
+          </div>
+          <details class="coomassie-paste-card">
+            <summary>从 Excel / WPS 粘贴样本表格</summary>
+            <p>推荐列顺序：样本名、A595-1、A595-2、A595-3、稀释倍数、提取总体积(mL)、样品质量(g)。可含表头。</p>
+            <textarea id="coomassieSamplePaste" rows="5" placeholder="样本名	A595-1	A595-2	A595-3	稀释倍数	提取体积mL	样品质量g&#10;样本1	0.320	0.315	0.326	10	5	0.2"></textarea>
+            <button id="importCoomassieSamples" class="button button-secondary" type="button">解析并替换样本</button>
+          </details>
+          <div class="table-wrap coomassie-table-wrap">
+            <table class="coomassie-table sample-table">
+              <thead id="coomassieSampleHead"></thead>
+              <tbody id="coomassieSampleBody"></tbody>
+            </table>
+          </div>
+
+          <div class="coomassie-result-footer">
+            <div>
+              <h3>计算公式与单位</h3>
+              <p><b>测定液浓度</b> = (扣空白后的 A595 − 截距) ÷ 斜率；<b>原液浓度</b> = 测定液浓度 × 稀释倍数；<b>蛋白含量 (mg/g)</b> = 原液浓度 (mg/mL) × 提取总体积 (mL) ÷ 样品质量 (g)。</p>
+            </div>
+            <button id="exportCoomassieCsv" class="button button-primary" type="button">导出标准曲线与样本 CSV</button>
+          </div>
+        </section>
+      </section>
     </main>
 
     <footer class="app-footer">
-      <div><strong>BioAssay Studio v2.5.1</strong><span>科研数据在当前浏览器中处理，网站不接收上传内容。</span></div>
+      <div><strong>BioAssay Studio v2.6.0</strong><span>科研数据在当前浏览器中处理，网站不接收上传内容。</span></div>
       <nav aria-label="网站信息"><a href="privacy.html">隐私与数据处理</a><a href="THIRD_PARTY_NOTICES.txt">第三方许可</a><a href="README.md">使用说明</a></nav>
     </footer>
 
@@ -362,10 +464,10 @@
     </dialog>
 
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
-  <script src="analysis-core.js?v=2.5.1-r4"></script>
+  <script src="analysis-core.js?v=2.6.0-r2"></script>
     <script src="vendor/xlsx.full.min.js"></script>
     <script src="vendor/chart.umd.js"></script>
     <script src="vendor/UTIF.js"></script>
-  <script src="app.js?v=2.5.1-r42"></script>
+  <script src="app.js?v=2.6.0-r2"></script>
   </body>
 </html>
