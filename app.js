@@ -160,7 +160,7 @@
       },
       figure: {
         editing: figure.editing,
-        entries: figure.images.map(entry => ({ protein: entry.protein, mass: entry.mass, rotation: entry.rotation, zoom: entry.zoom, laneNames: entry.laneNames, values: entry.values, manualCenters: entry.manualCenters ? [...entry.manualCenters] : null })),
+        entries: figure.images.map(entry => ({ protein: entry.protein, mass: entry.mass, rotation: entry.rotation, zoom: entry.zoom, verticalOffset: entry.verticalOffset, laneCount: entry.laneCount, laneNames: entry.laneNames, values: entry.values, manualCenters: entry.manualCenters ? [...entry.manualCenters] : null })),
       },
       controls: captureProjectControls(),
     };
@@ -2164,10 +2164,16 @@
         });
       });
     });
+    const filteredCandidates = core.filterBandGeometryOutliers(candidates, {
+      sourceWidth,
+      sourceHeight,
+      expectedLaneCount,
+    });
     return {
-      candidates,
+      candidates: filteredCandidates,
       bounds,
       lanes,
+      geometryOutliersRemoved: candidates.length - filteredCandidates.length,
       ignoredLeftPercent: normalizedIgnoredLeft,
       rowGuided: Boolean(rowFocus),
       rowGuideCount: rowFocus?.rows?.length || 0,
@@ -2325,12 +2331,13 @@
     const backgroundCount = generated.filter(roi => roi.type === 'background').length;
     const laneSource = expectedLaneCount ? `按填写的 ${expectedLaneCount} 个泳道` : `自动估计的 ${detection.lanes.length} 个泳道`;
     const markerNote = detection.ignoredLeftPercent ? `，已忽略左侧 ${fmt(detection.ignoredLeftPercent, 0)}% Marker 区域` : '';
+    const outlierNote = detection.geometryOutliersRemoved ? `，已排除 ${detection.geometryOutliersRemoved} 个偏离主条带行的边缘伪影` : '';
     const preprocessingNote = detection.rowGuided
       ? `；识别副本已裁除无关区域并按条带行补偿 ${fmt(wb.viewAngle, 2)}° 倾斜（定量仍读取原始像素）`
       : '';
-    $('#autoDetectionNote').textContent = generated.length ? `已定位膜区域${markerNote}，并${laneSource}推荐 ${selected.length} 个条带和 ${backgroundCount} 个背景 ROI${preprocessingNote}。候选框已按真实信号边缘精修，请在导出前人工确认。` : '未找到足够清晰的候选条带；请提高灵敏度，或填写预期泳道数后重试。';
+    $('#autoDetectionNote').textContent = generated.length ? `已定位膜区域${markerNote}${outlierNote}，并${laneSource}推荐 ${selected.length} 个条带和 ${backgroundCount} 个背景 ROI${preprocessingNote}。候选框已按真实信号边缘精修，请在导出前人工确认。` : '未找到足够清晰的候选条带；请提高灵敏度，或填写预期泳道数后重试。';
     updateWb();
-    recordAudit('wb-auto-detect', { expectedLaneCount, ignoredLeftPercent: detection.ignoredLeftPercent, bandsPerLane, selectedBands: selected.length, backgroundCount });
+    recordAudit('wb-auto-detect', { expectedLaneCount, ignoredLeftPercent: detection.ignoredLeftPercent, bandsPerLane, selectedBands: selected.length, geometryOutliersRemoved: detection.geometryOutliersRemoved || 0, backgroundCount });
     if (generated.length) toastMessage(`自动识别完成：${selected.length} 个候选条带。`);
   }
 
@@ -3146,16 +3153,19 @@
     const entry = figure.images[index];
     const manualText = entry.manualCenters?.map(center => (center * 100).toFixed(1)).join(', ') || '';
     const zoom = clamp(Math.round(number(entry.zoom, 100) * 10) / 10, 50, 240);
+    const verticalOffset = clamp(Math.round(number(entry.verticalOffset, 0)), -220, 220);
+    const laneCount = clamp(Math.round(number(entry.laneCount, 0)), 0, 96);
     const perImageFields = $('#figureLaneScope').value === 'per-image'
-      ? `<label>本图泳道名称（左→右）<textarea data-figure-field="laneNames" data-figure-index="${index}" rows="5" placeholder="Control, Model, Treatment…">${escapeHtml(entry.laneNames || '')}</textarea></label><label>本图归一化数值<textarea data-figure-field="values" data-figure-index="${index}" rows="4" placeholder="1.00, 0.76, 0.95…">${escapeHtml(entry.values || '')}</textarea></label>`
+      ? `<label>本图期望泳道/条带数 <span class="field-hint">可选，不含 Marker</span><input data-figure-field="laneCount" data-figure-index="${index}" type="number" min="1" max="96" value="${laneCount || ''}" placeholder="留空自动识别" /></label><label>本图泳道名称（左→右）<textarea data-figure-field="laneNames" data-figure-index="${index}" rows="5" placeholder="Control, Model, Treatment…">${escapeHtml(entry.laneNames || '')}</textarea></label><label>本图归一化数值<textarea data-figure-field="values" data-figure-index="${index}" rows="4" placeholder="1.00, 0.76, 0.95…">${escapeHtml(entry.values || '')}</textarea></label>`
       : '<small>当前为“整组共用”，泳道名称和数值请在左侧全局标注中填写。</small>';
-    host.innerHTML = `<div class="figure-panel-card"><strong>图 ${index + 1} · ${escapeHtml(entry.name)}</strong><label>蛋白名称<input data-figure-field="protein" data-figure-index="${index}" value="${escapeHtml(entry.protein)}" placeholder="如：α-Tubulin" /></label><label>分子量（kDa）<input data-figure-field="mass" data-figure-index="${index}" value="${escapeHtml(entry.mass)}" placeholder="如：50" /></label>${perImageFields}<label>水平角度微调（°）<input data-figure-field="rotation" data-figure-index="${index}" type="number" min="-12" max="12" step="0.1" value="${escapeHtml(entry.rotation ?? 0)}" /></label><div class="figure-zoom-row"><label>图像缩放（等比）<input class="figure-zoom-slider" data-figure-field="zoom" data-figure-index="${index}" type="range" min="50" max="240" step="0.1" value="${zoom}" /></label><label class="figure-zoom-number">缩放（%）<input data-figure-field="zoom" data-figure-index="${index}" type="number" min="50" max="240" step="0.1" value="${zoom}" /></label></div><label>手动中心位置（%）<input class="figure-center-input" data-figure-centers data-figure-index="${index}" value="${manualText}" placeholder="开启手动校正后生成；可删改重填" /></label><small>可拖动滑块或直接输入 50–240% 的精确缩放值；始终等比缩放，不改变条带形状。黄线只定位泳道。</small><small id="figureDetect-${index}">等待识别</small></div>`;
+    host.innerHTML = `<div class="figure-panel-card"><strong>图 ${index + 1} · ${escapeHtml(entry.name)}</strong><label>蛋白名称<input data-figure-field="protein" data-figure-index="${index}" value="${escapeHtml(entry.protein)}" placeholder="如：α-Tubulin" /></label><label>分子量（kDa）<input data-figure-field="mass" data-figure-index="${index}" value="${escapeHtml(entry.mass)}" placeholder="如：50" /></label>${perImageFields}<label>水平角度微调（°）<input data-figure-field="rotation" data-figure-index="${index}" type="number" min="-12" max="12" step="0.1" value="${escapeHtml(entry.rotation ?? 0)}" /></label><div class="figure-zoom-row"><label>图像缩放（等比）<input class="figure-zoom-slider" data-figure-field="zoom" data-figure-index="${index}" type="range" min="50" max="240" step="0.1" value="${zoom}" /></label><label class="figure-zoom-number">缩放（%）<input data-figure-field="zoom" data-figure-index="${index}" type="number" min="50" max="240" step="0.1" value="${zoom}" /></label></div><div class="figure-zoom-row"><label>图像上下位置（正数向下）<input class="figure-zoom-slider" data-figure-field="verticalOffset" data-figure-index="${index}" type="range" min="-220" max="220" step="1" value="${verticalOffset}" /></label><label class="figure-zoom-number">位置（px）<input data-figure-field="verticalOffset" data-figure-index="${index}" type="number" min="-220" max="220" step="1" value="${verticalOffset}" /></label></div><label>手动中心位置（%）<input class="figure-center-input" data-figure-centers data-figure-index="${index}" value="${manualText}" placeholder="开启手动校正后生成；可删改重填" /></label><small>缩放始终保持条带比例；上下位置只移动图像、不改变条带形状。手动模式中，删除黄线会同时排除对应条带和名称/数值。</small><small id="figureDetect-${index}">等待识别</small></div>`;
   }
 
   function updateFigureLaneScopeUi() {
     const perImage = $('#figureLaneScope').value === 'per-image';
     $('#figureLaneNames').disabled = perImage;
     $('#figureValues').disabled = perImage;
+    $('#figureLaneCount').disabled = perImage;
     renderFigurePanelInputs();
   }
 
@@ -3190,9 +3200,10 @@
   }
 
   function figureExpectedLaneCount(entry = null) {
-    const configuredCount = clamp(Math.round(number($('#figureLaneCount').value, 0)), 0, 96);
-    const annotations = figureAnnotationValues(entry);
-    return configuredCount || annotations.names.length || annotations.values.length;
+    const configuredValue = $('#figureLaneScope').value === 'per-image'
+      ? entry?.laneCount
+      : $('#figureLaneCount').value;
+    return clamp(Math.round(number(configuredValue, 0)), 0, 96);
   }
 
   function updateFigureEditControls() {
@@ -3211,10 +3222,10 @@
     $('#figureEditHint').textContent = figure.editing
       ? (figure.editTool === 'add'
         ? '增加模式：在黑框内需要的位置单击，新增黄线并同步增加名称项；完成后自动返回选择模式。'
-        : '选择模式：单击黄线选中，拖动可移动；可用“删除选中黄线”删除，并同步删除对应名称和数值。')
+        : '选择模式：单击黄线选中，拖动可移动；删除黄线会排除对应条带，并同步删除名称和数值。')
       : (figure.frameEditing
         ? '拖动黑框边缘或四角可统一改变全部黑框尺寸；尺寸数值会实时显示。图像始终等比缩放。'
-        : '黄线只定位泳道，不改变裁剪、缩放或条带形状；图片放大请使用每张图的“图像缩放”。');
+        : '手动模式中的黄线决定保留泳道；删除黄线会排除对应条带。缩放与上下位置可在每张图设置中调整。');
   }
 
   function toggleFigureFrameEdit() {
@@ -3317,7 +3328,6 @@
       $('#figureLaneNames').value = edited.names.join('\n');
       $('#figureValues').value = edited.values.join('\n');
     }
-    $('#figureLaneCount').value = edited.names.length || '';
   }
 
   function deleteSelectedFigureGuide() {
@@ -3469,6 +3479,46 @@
     const slope = clamp(percentile(slopes, 0.5) || 0, -0.14, 0.14);
     const intercept = percentile(points.map(point => point.y - slope * point.x), 0.5) || 0;
     return { slope, intercept, angle: clamp(-Math.atan(slope) * 180 / Math.PI, -8, 8) };
+  }
+
+  function figureManualBandCandidates(manualCenters, automaticCandidates, sourceWidth, sourceHeight) {
+    const centers = [...manualCenters]
+      .map(center => clamp(number(center, 0), 0, 1))
+      .sort((a, b) => a - b);
+    const available = automaticCandidates
+      .filter(candidate => Number.isFinite(candidate.x) && Number.isFinite(candidate.y))
+      .map(candidate => ({ ...candidate }));
+    const widths = available.map(candidate => candidate.width).filter(width => width > 0);
+    const heights = available.map(candidate => candidate.height).filter(height => height > 0);
+    const templateWidth = percentile(widths, 0.5) || Math.max(8, sourceWidth * 0.045);
+    const templateHeight = percentile(heights, 0.5) || Math.max(4, sourceHeight * 0.04);
+    const line = figureBandLine(available);
+    return centers.map(center => {
+      const centerX = center * sourceWidth;
+      let nearestIndex = -1;
+      let nearestDistance = Infinity;
+      available.forEach((candidate, index) => {
+        const distance = Math.abs(candidate.x + candidate.width / 2 - centerX);
+        if (distance < nearestDistance) {
+          nearestIndex = index;
+          nearestDistance = distance;
+        }
+      });
+      const matched = nearestIndex >= 0 ? available.splice(nearestIndex, 1)[0] : null;
+      const width = Math.max(1, matched?.width || templateWidth);
+      const height = Math.max(1, matched?.height || templateHeight);
+      const centerY = matched
+        ? matched.y + matched.height / 2
+        : line.slope * centerX + line.intercept;
+      return {
+        ...(matched || {}),
+        x: clamp(centerX - width / 2, 0, Math.max(0, sourceWidth - width)),
+        y: clamp(centerY - height / 2, 0, Math.max(0, sourceHeight - height)),
+        width,
+        height,
+        manual: true,
+      };
+    });
   }
 
   function smoothSeries(values, radius) {
@@ -3685,7 +3735,7 @@
     };
   }
 
-  function composeFigureFrame(stripCanvas, width, height, zoomPercent = 100) {
+  function composeFigureFrame(stripCanvas, width, height, zoomPercent = 100, verticalOffset = 0) {
     const frameCanvas = document.createElement('canvas');
     frameCanvas.width = width;
     frameCanvas.height = height;
@@ -3704,6 +3754,41 @@
     }
     frameCtx.fillStyle = `rgb(${Math.round(percentile(samples.r, 0.5) || 255)}, ${Math.round(percentile(samples.g, 0.5) || 255)}, ${Math.round(percentile(samples.b, 0.5) || 255)})`;
     frameCtx.fillRect(0, 0, width, height);
+    // Keep the whole black frame filled with membrane background even when the
+    // foreground strip is reduced or moved. A one-pixel horizontal background
+    // profile sampled from the strip edges preserves the original left-to-right
+    // membrane variation without duplicating or stretching the protein bands.
+    const backgroundLine = document.createElement('canvas');
+    backgroundLine.width = stripCanvas.width;
+    backgroundLine.height = 1;
+    const backgroundLineCtx = backgroundLine.getContext('2d');
+    const backgroundLineData = backgroundLineCtx.createImageData(stripCanvas.width, 1);
+    const sampleRows = [...new Set([
+      0,
+      Math.min(stripCanvas.height - 1, Math.floor(edgeDepth / 2)),
+      Math.max(0, stripCanvas.height - 1 - Math.floor(edgeDepth / 2)),
+      stripCanvas.height - 1,
+    ])];
+    for (let x = 0; x < stripCanvas.width; x += 1) {
+      const red = [];
+      const green = [];
+      const blue = [];
+      sampleRows.forEach(y => {
+        const offset = (y * stripCanvas.width + x) * 4;
+        red.push(sample[offset]);
+        green.push(sample[offset + 1]);
+        blue.push(sample[offset + 2]);
+      });
+      const target = x * 4;
+      backgroundLineData.data[target] = percentile(red, 0.5);
+      backgroundLineData.data[target + 1] = percentile(green, 0.5);
+      backgroundLineData.data[target + 2] = percentile(blue, 0.5);
+      backgroundLineData.data[target + 3] = 255;
+    }
+    backgroundLineCtx.putImageData(backgroundLineData, 0, 0);
+    frameCtx.imageSmoothingEnabled = true;
+    frameCtx.imageSmoothingQuality = 'high';
+    frameCtx.drawImage(backgroundLine, 0, 0, width, height);
     // 100% means an aspect-preserving "cover": the detected strip fills the
     // black frame without side blanks. Overflow is clipped, never stretched.
     // Users can zoom below 100% when they intentionally want more background.
@@ -3712,7 +3797,7 @@
     const drawWidth = stripCanvas.width * scale;
     const drawHeight = stripCanvas.height * scale;
     const offsetX = (width - drawWidth) / 2;
-    const offsetY = (height - drawHeight) / 2;
+    const offsetY = (height - drawHeight) / 2 + clamp(number(verticalOffset, 0), -220, 220);
     frameCtx.save();
     frameCtx.beginPath(); frameCtx.rect(0, 0, width, height); frameCtx.clip();
     frameCtx.imageSmoothingEnabled = true;
@@ -3750,6 +3835,41 @@
     };
   }
 
+  function figureLaneLabelMetrics(laneXs, laneNames, fontSize) {
+    figureCtx.save();
+    figureCtx.font = `600 ${fontSize}px "Times New Roman", serif`;
+    const labels = laneXs
+      .map((x, index) => laneNames[index] === undefined ? null : ({
+        x,
+        width: Math.max(fontSize * 0.8, figureCtx.measureText(String(laneNames[index])).width),
+      }))
+      .filter(Boolean);
+    figureCtx.restore();
+    let angle = 27.5;
+    if (labels.length > 1) {
+      for (let candidateAngle = 27.5; candidateAngle <= 82; candidateAngle += 0.5) {
+        const radians = candidateAngle * Math.PI / 180;
+        const horizontalHeight = fontSize * Math.sin(radians);
+        const extents = labels.map(label => (label.width * Math.cos(radians) + horizontalHeight) / 2);
+        const fits = labels.slice(1).every((label, index) => (
+          label.x - labels[index].x >= extents[index] + extents[index + 1] + Math.max(4, fontSize * 0.18)
+        ));
+        angle = candidateAngle;
+        if (fits) break;
+      }
+    }
+    const radians = angle * Math.PI / 180;
+    const verticalReach = labels.reduce((maximum, label) => Math.max(
+      maximum,
+      label.width * Math.sin(radians) + fontSize * Math.cos(radians),
+    ), fontSize);
+    return {
+      angleDegrees: -angle,
+      angleRadians: -radians,
+      verticalReach,
+    };
+  }
+
   function renderWbFigure(showGuides = figure.editing) {
     if (!figure.images.length) {
       drawFigureEmptyState();
@@ -3770,28 +3890,61 @@
     const cropPadding = clamp(Math.round(number($('#figureCropPadding').value, 12)), 2, 80);
     const backgroundStrength = clamp(Math.round(number($('#figureBackgroundStrength').value, 62)), 0, 100);
     const { proteinFontSize, massFontSize, valueFontSize, laneFontSize } = figureTypography();
-    const laneLabelAngleDegrees = -clamp(27.5 + Math.max(0, laneFontSize - 20) * 1.2, 27.5, 58);
-    const laneLabelAngle = laneLabelAngleDegrees * Math.PI / 180;
     const panelGap = clamp(Math.round(number($('#figurePanelGap').value, 18)), 4, 100);
     const frameWidth = clamp(Math.round(number($('#figureFrameWidth').value, 840)), 260, 920);
     const frameHeight = clamp(Math.round(number($('#figureFrameHeight').value, 78)), 32, 220);
     const frame = { x: Math.round((1200 - frameWidth) / 2), width: frameWidth, height: frameHeight };
     const perImageAnnotations = $('#figureLaneScope').value === 'per-image';
-    let layoutCursor = 24;
-    const panelMetrics = figure.images.map((entry, index) => {
+    const preparedPanels = figure.images.map((entry, index) => {
       const annotations = figureAnnotationValues(entry);
+      const sourceWidth = entry.image.naturalWidth || entry.image.width;
+      const sourceHeight = entry.image.naturalHeight || entry.image.height;
+      const expectedCount = figureExpectedLaneCount(entry);
+      const automaticCandidates = figureLaneCandidates(entry, expectedCount);
+      const candidates = Array.isArray(entry.manualCenters)
+        ? figureManualBandCandidates(entry.manualCenters, automaticCandidates, sourceWidth, sourceHeight)
+        : automaticCandidates;
+      const bandLine = figureBandLine(candidates.length ? candidates : automaticCandidates);
+      const autoAngle = autoDeskew ? bandLine.angle : 0;
+      const totalAngle = autoAngle + clamp(number(entry.rotation, 0), -12, 12);
+      const strip = buildFigureStrip(entry, candidates, candidates, cropPadding, whiteBackground, totalAngle, backgroundStrength, preserveColor);
+      const composed = composeFigureFrame(strip.canvas, frame.width, frame.height, entry.zoom, entry.verticalOffset);
+      const laneXs = candidates.map(candidate => {
+        const sourceX = candidate.x + candidate.width / 2;
+        const sourceY = Number.isFinite(candidate.y) ? candidate.y + Math.max(candidate.height || 0, 1) / 2 : bandLine.slope * sourceX + bandLine.intercept;
+        return clamp(frame.x + composed.offsetX + strip.mapSourcePoint(sourceX, sourceY).x * composed.scale, frame.x, frame.x + frame.width);
+      });
+      const laneLabelMetrics = figureLaneLabelMetrics(laneXs, annotations.names, laneFontSize);
+      return {
+        entry,
+        index,
+        annotations,
+        sourceWidth,
+        expectedCount,
+        automaticCandidates,
+        bandLine,
+        candidates,
+        totalAngle,
+        strip,
+        composed,
+        laneXs,
+        laneLabelMetrics,
+      };
+    });
+    let layoutCursor = 24;
+    const panelMetrics = preparedPanels.map(panel => {
+      const { index, annotations, laneLabelMetrics } = panel;
       const showLaneNamesForPanel = perImageAnnotations || (lanePosition === 'above' ? index === 0 : index === figure.images.length - 1);
       const showGroupsForPanel = perImageAnnotations || index === figure.images.length - 1;
       const hasValues = showValues && annotations.values.length > 0;
       const needsAbove = (hasValues && valuePosition === 'above') || (showLaneNamesForPanel && annotations.names.length && lanePosition === 'above');
       const needsBelow = (hasValues && valuePosition === 'below') || (showLaneNamesForPanel && annotations.names.length && lanePosition === 'below');
-      const longestLaneName = annotations.names.reduce((length, name) => Math.max(length, [...name].length), 0);
       const laneNameReach = showLaneNamesForPanel && annotations.names.length
-        ? clamp(Math.round(longestLaneName * laneFontSize * 0.26 + laneFontSize * 1.1), 34, 176)
+        ? clamp(Math.ceil(laneLabelMetrics.verticalReach), 34, 900)
         : 0;
       const sameAnnotationSide = hasValues && showLaneNamesForPanel && annotations.names.length && valuePosition === lanePosition;
       const valueReach = hasValues
-        ? 18 + valueFontSize + (sameAnnotationSide ? Math.max(26, laneFontSize * 1.8) : 0)
+        ? 18 + valueFontSize + (sameAnnotationSide ? laneLabelMetrics.verticalReach + Math.max(12, laneFontSize * 0.3) : 0)
         : 0;
       const nameReach = laneNameReach ? 34 + laneNameReach : 0;
       const aboveSpace = needsAbove ? Math.max(78, valuePosition === 'above' ? valueReach + 12 : 0, lanePosition === 'above' ? nameReach + 12 : 0) : 18;
@@ -3812,19 +3965,12 @@
     figureCanvas.classList.toggle('figure-editing', Boolean(showGuides));
     figureCanvas.classList.toggle('figure-frame-editing', figure.frameEditing);
 
-    figure.images.forEach((entry, index) => {
+    preparedPanels.forEach(panel => {
+      const {
+        entry, index, sourceWidth, expectedCount, automaticCandidates, bandLine, candidates,
+        totalAngle, strip, composed, laneXs, laneLabelMetrics,
+      } = panel;
       const { frameY, names: laneNames, values, showLaneNamesForPanel, showGroupsForPanel } = panelMetrics[index];
-      const sourceWidth = entry.image.naturalWidth || entry.image.width;
-      const expectedCount = figureExpectedLaneCount(entry);
-      const automaticCandidates = figureLaneCandidates(entry, expectedCount);
-      const bandLine = figureBandLine(automaticCandidates);
-      const candidates = Array.isArray(entry.manualCenters)
-        ? [...entry.manualCenters].sort((a, b) => a - b).map(center => ({ x: center * sourceWidth, width: 0, manual: true }))
-        : automaticCandidates;
-      const autoAngle = autoDeskew ? bandLine.angle : 0;
-      const totalAngle = autoAngle + clamp(number(entry.rotation, 0), -12, 12);
-      const strip = buildFigureStrip(entry, candidates, automaticCandidates, cropPadding, whiteBackground, totalAngle, backgroundStrength, preserveColor);
-      const composed = composeFigureFrame(strip.canvas, frame.width, frame.height, entry.zoom);
       statuses.push(`图 ${index + 1}：${Array.isArray(entry.manualCenters) ? '手动校正' : '识别'} ${candidates.length}${expectedCount ? ` / ${expectedCount}` : ''} 条主带，水平校正 ${fmt(totalAngle, 2)}°`);
 
       figureCtx.drawImage(composed.canvas, frame.x, frameY);
@@ -3849,11 +3995,8 @@
         figureCtx.fillText(panelLetter, 24, frameY - 28);
       }
 
-      const laneXs = candidates.map(candidate => {
-        const sourceX = candidate.x + candidate.width / 2;
-        const sourceY = Number.isFinite(candidate.y) ? candidate.y + Math.max(candidate.height || 0, 1) / 2 : bandLine.slope * sourceX + bandLine.intercept;
-        return clamp(frame.x + composed.offsetX + strip.mapSourcePoint(sourceX, sourceY).x * composed.scale, frame.x, frame.x + frame.width);
-      });
+      const laneLabelAngleDegrees = laneLabelMetrics.angleDegrees;
+      const laneLabelAngle = laneLabelMetrics.angleRadians;
       // Yellow guides, values and lane names share one x-coordinate array.
       // Keep each annotation type on one fixed baseline; increasing the font
       // must never stagger labels or detach them from their physical lane.
@@ -3868,18 +4011,17 @@
           const sameAnnotationSide = valuePosition === lanePosition && showLaneNamesForPanel && laneNames[laneIndex] !== undefined;
           const direction = valuePosition === 'above' ? -1 : 1;
           const base = valuePosition === 'above' ? frameY - 18 : frameY + frame.height + 18;
-          const laneOffset = sameAnnotationSide ? Math.max(26, laneFontSize * 1.8) : 0;
+          const laneOffset = sameAnnotationSide ? laneLabelMetrics.verticalReach + Math.max(12, laneFontSize * 0.3) : 0;
           figureCtx.fillText(values[laneIndex], x, base + direction * (valueLevels[laneIndex] * 22 + laneOffset));
         }
         if (showLaneNamesForPanel && laneNames[laneIndex] !== undefined) {
           figureCtx.save();
-          const direction = lanePosition === 'above' ? -1 : 1;
-          const base = lanePosition === 'above' ? frameY - 34 : frameY + frame.height + 38;
-          figureCtx.translate(x, base + direction * nameLevels[laneIndex] * 25);
+          const base = lanePosition === 'above' ? frameY - 18 : frameY + frame.height + 18;
+          figureCtx.translate(x, base);
           figureCtx.rotate(laneLabelAngle);
           figureCtx.fillStyle = '#111827';
           figureCtx.font = `600 ${laneFontSize}px "Times New Roman", serif`;
-          figureCtx.textAlign = 'center';
+          figureCtx.textAlign = lanePosition === 'above' ? 'left' : 'right';
           figureCtx.fillText(laneNames[laneIndex], 0, 0);
           figureCtx.restore();
         }
@@ -3929,7 +4071,7 @@
         [[frame.x, frameY], [frame.x + frame.width, frameY], [frame.x, frameY + frame.height], [frame.x + frame.width, frameY + frame.height]].forEach(([x, y]) => figureCtx.fillRect(x - 5, y - 5, 10, 10));
         figureCtx.restore();
       }
-      figure.layouts.push({ index, frameY, frame: { ...frame }, imageX: frame.x + composed.offsetX, imageWidth: composed.drawWidth, imageScale: composed.scale, sourceWidth, cropX: strip.x0, cropWidth: strip.cropWidth, mapSourcePoint: strip.mapSourcePoint, bandLine, candidates, stripCanvas: composed.canvas, rawStripCanvas: strip.canvas, laneXs, laneNames, values, showLaneNamesForPanel, showGroupsForPanel, valueLevels, nameLevels, laneLabelAngleDegrees, panelLetter, massText, entry, compositionMode, proteinSide, massSide, valuePosition, lanePosition, proteinFontSize, massFontSize });
+      figure.layouts.push({ index, frameY, frame: { ...frame }, imageX: frame.x + composed.offsetX, imageWidth: composed.drawWidth, imageScale: composed.scale, sourceWidth, cropX: strip.x0, cropWidth: strip.cropWidth, mapSourcePoint: strip.mapSourcePoint, bandLine, candidates, stripCanvas: composed.canvas, rawStripCanvas: strip.canvas, laneXs, laneNames, values, showLaneNamesForPanel, showGroupsForPanel, valueLevels, nameLevels, laneLabelAngleDegrees, laneLabelVerticalReach: laneLabelMetrics.verticalReach, panelLetter, massText, entry, compositionMode, proteinSide, massSide, valuePosition, lanePosition, proteinFontSize, massFontSize });
       const status = $(`#figureDetect-${index}`);
       if (status) status.textContent = statuses[statuses.length - 1];
     });
@@ -3944,10 +4086,17 @@
     pushHistory('载入 WB 排版图片');
     Promise.all(validFiles.map(async file => {
       const { image, source } = await decodeSourceFile(file);
-      return { name: file.name, image, source, protein: '', mass: '', rotation: 0, zoom: 100, laneNames: '', values: '' };
+      return { name: file.name, image, source, protein: '', mass: '', rotation: 0, zoom: 100, verticalOffset: 0, laneCount: '', laneNames: '', values: '' };
     })).then(entries => {
       figure.images = entries;
       figure.selectedImageIndex = 0;
+      figure.editing = false;
+      figure.frameEditing = false;
+      figure.editTool = 'select';
+      figure.selectedGuide = null;
+      figure.dragging = null;
+      figure.frameResize = null;
+      $('#figureLaneCount').value = '';
       renderFigurePanelInputs();
       renderWbFigure();
       toastMessage(`已载入 ${entries.length} 张 WB 图，可填写图注并导出。`);
@@ -3967,7 +4116,6 @@
       $('#figureValues').value = rows.map(row => fmt(row.relative, 2)).join(', ');
       if (!$('#figureLaneNames').value.trim()) $('#figureLaneNames').value = rows.map(row => `泳道 ${row.lane}`).join(', ');
     }
-    if (!$('#figureLaneCount').value) $('#figureLaneCount').value = rows.length;
     renderWbFigure();
     toastMessage('已带入双图相对表达量；仍可在图注工作区内手动修改。');
   }
@@ -4034,7 +4182,7 @@
     const physicalWidth = `${millimeters}mm`;
     const parts = [`<svg xmlns="http://www.w3.org/2000/svg" width="${physicalWidth}" viewBox="0 0 ${figureCanvas.width} ${figureCanvas.height}">`, '<rect width="100%" height="100%" fill="white"/>'];
     figure.layouts.forEach(layout => {
-      const { frame, frameY, laneXs, laneNames, values, showLaneNamesForPanel, showGroupsForPanel, valueLevels, nameLevels, laneLabelAngleDegrees, entry } = layout;
+      const { frame, frameY, laneXs, laneNames, values, showLaneNamesForPanel, showGroupsForPanel, valueLevels, nameLevels, laneLabelAngleDegrees, laneLabelVerticalReach, entry } = layout;
       parts.push(`<image href="${layout.stripCanvas.toDataURL('image/png')}" x="${frame.x}" y="${frameY}" width="${frame.width}" height="${frame.height}" preserveAspectRatio="none"/>`);
       parts.push(`<rect x="${frame.x}" y="${frameY}" width="${frame.width}" height="${frame.height}" fill="none" stroke="#101010" stroke-width="3"/>`);
       const sameSide = proteinSide === massSide;
@@ -4048,14 +4196,13 @@
           const sameAnnotationSide = valuePosition === lanePosition && showLaneNamesForPanel && laneNames[laneIndex] !== undefined;
           const direction = valuePosition === 'above' ? -1 : 1;
           const base = valuePosition === 'above' ? frameY - 18 : frameY + frame.height + 18;
-          const laneOffset = sameAnnotationSide ? Math.max(26, laneFontSize * 1.8) : 0;
+          const laneOffset = sameAnnotationSide ? laneLabelVerticalReach + Math.max(12, laneFontSize * 0.3) : 0;
           parts.push(`<text x="${x}" y="${base + direction * (valueLevels[laneIndex] * 22 + laneOffset)}" text-anchor="middle" dominant-baseline="middle" font-family="Times New Roman" font-size="${valueFontSize}" font-weight="600">${escapeHtml(values[laneIndex])}</text>`);
         }
         if (showLaneNamesForPanel && laneNames[laneIndex] !== undefined) {
-          const direction = lanePosition === 'above' ? -1 : 1;
-          const base = lanePosition === 'above' ? frameY - 34 : frameY + frame.height + 38;
-          const y = base + direction * nameLevels[laneIndex] * 25;
-          parts.push(`<text x="${x}" y="${y}" text-anchor="middle" dominant-baseline="middle" transform="rotate(${laneLabelAngleDegrees} ${x} ${y})" font-family="Times New Roman" font-size="${laneFontSize}" font-weight="600">${escapeHtml(laneNames[laneIndex])}</text>`);
+          const y = lanePosition === 'above' ? frameY - 18 : frameY + frame.height + 18;
+          const anchor = lanePosition === 'above' ? 'start' : 'end';
+          parts.push(`<text x="${x}" y="${y}" text-anchor="${anchor}" dominant-baseline="middle" transform="rotate(${laneLabelAngleDegrees} ${x} ${y})" font-family="Times New Roman" font-size="${laneFontSize}" font-weight="600">${escapeHtml(laneNames[laneIndex])}</text>`);
         }
       });
       if (showGroupsForPanel) groups.forEach((group, groupIndex) => {
@@ -4194,6 +4341,8 @@
           mass: entry.mass,
           rotation: entry.rotation,
           zoom: entry.zoom,
+          verticalOffset: entry.verticalOffset,
+          laneCount: entry.laneCount,
           laneNames: entry.laneNames,
           values: entry.values,
           manualCenters: entry.manualCenters,
@@ -4300,6 +4449,8 @@
         mass: entry.mass || '',
         rotation: number(entry.rotation, 0),
         zoom: clamp(number(entry.zoom, 100), 50, 240),
+        verticalOffset: clamp(Math.round(number(entry.verticalOffset, 0)), -220, 220),
+        laneCount: clamp(Math.round(number(entry.laneCount, 0)), 0, 96) || '',
         laneNames: entry.laneNames || '',
         values: entry.values || '',
         ...(Array.isArray(entry.manualCenters) ? { manualCenters: entry.manualCenters } : {}),
@@ -4546,17 +4697,22 @@
     $('#figureImageSelect').addEventListener('change', event => {
       figure.selectedImageIndex = clamp(Math.round(number(event.target.value, 0)), 0, Math.max(0, figure.images.length - 1));
       renderFigurePanelInputs();
+      renderWbFigure();
     });
     $('#figurePanelInputs').addEventListener('input', event => {
       const index = Number(event.target.dataset.figureIndex);
       const field = event.target.dataset.figureField;
       if (!Number.isInteger(index) || !field || !figure.images[index]) return;
-      if (field === 'zoom') {
+      if (field === 'zoom' || field === 'verticalOffset') {
         if (event.target.value === '') return;
-        const zoom = clamp(Math.round(number(event.target.value, figure.images[index].zoom || 100) * 10) / 10, 50, 240);
-        figure.images[index].zoom = zoom;
-        event.target.closest('.figure-zoom-row')?.querySelectorAll('[data-figure-field="zoom"]').forEach(control => {
-          if (control !== event.target) control.value = zoom;
+        const isZoom = field === 'zoom';
+        const fallback = isZoom ? (figure.images[index].zoom || 100) : (figure.images[index].verticalOffset || 0);
+        const value = isZoom
+          ? clamp(Math.round(number(event.target.value, fallback) * 10) / 10, 50, 240)
+          : clamp(Math.round(number(event.target.value, fallback)), -220, 220);
+        figure.images[index][field] = value;
+        event.target.closest('.figure-zoom-row')?.querySelectorAll(`[data-figure-field="${field}"]`).forEach(control => {
+          if (control !== event.target) control.value = value;
         });
       } else {
         figure.images[index][field] = event.target.value;
@@ -4564,13 +4720,18 @@
       renderWbFigure();
     });
     $('#figurePanelInputs').addEventListener('change', event => {
-      if (event.target.dataset.figureField === 'zoom') {
+      if (event.target.dataset.figureField === 'zoom' || event.target.dataset.figureField === 'verticalOffset') {
         const index = Number(event.target.dataset.figureIndex);
         const entry = figure.images[index];
         if (!entry) return;
-        const zoom = clamp(Math.round(number(event.target.value, entry.zoom || 100) * 10) / 10, 50, 240);
-        entry.zoom = zoom;
-        event.target.closest('.figure-zoom-row')?.querySelectorAll('[data-figure-field="zoom"]').forEach(control => { control.value = zoom; });
+        const field = event.target.dataset.figureField;
+        const isZoom = field === 'zoom';
+        const fallback = isZoom ? (entry.zoom || 100) : (entry.verticalOffset || 0);
+        const value = isZoom
+          ? clamp(Math.round(number(event.target.value, fallback) * 10) / 10, 50, 240)
+          : clamp(Math.round(number(event.target.value, fallback)), -220, 220);
+        entry[field] = value;
+        event.target.closest('.figure-zoom-row')?.querySelectorAll(`[data-figure-field="${field}"]`).forEach(control => { control.value = value; });
         renderWbFigure();
         return;
       }
