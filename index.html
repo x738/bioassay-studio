@@ -9,7 +9,7 @@
     <link rel="icon" href="icon.svg" type="image/svg+xml" />
     <link rel="manifest" href="manifest.webmanifest" />
     <title>BioAssay Studio | qPCR 与 WB 定量</title>
-    <link rel="stylesheet" href="styles.css?v=2.5.1-r32" />
+    <link rel="stylesheet" href="styles.css?v=2.5.1-r35" />
   </head>
   <body>
     <header class="app-header">
@@ -122,7 +122,12 @@
                 <label class="checkbox-row"><input id="autoBackground" type="checkbox" checked />添加自动背景 ROI</label>
                 <label class="checkbox-row"><input id="wbAutoExcludeBad" type="checkbox" />自动排除严重 QC 条带</label>
                 <button id="autoDetectWb" class="button button-auto" type="button">自动识别条带与背景</button>
-                <button id="clearAutoRois" class="text-action" type="button">仅清除自动 ROI</button>
+                <div class="auto-correction-paths">
+                  <strong>自动结果不准时有两种改法</strong>
+                  <p><b>方法 1：</b>点击下方按钮清除自动框，再选择“条带”或“背景”在图上重新框选。</p>
+                  <button id="clearAutoRois" class="text-action" type="button">清除自动框，改为手动框选</button>
+                  <p><b>方法 2：</b>保留自动框；点击框后拖动内部可移动，拖动四边或四角白色手柄可缩放。</p>
+                </div>
                 <p id="autoDetectionNote" class="auto-note">自动定位真实泳道中心后逐泳道找峰；预期泳道数仅用于补全弱带，不会等距切分图片。</p>
               </div>
               <div class="tool-divider"></div>
@@ -156,7 +161,7 @@
                   </div>
                 </div>
               </div>
-              <div class="canvas-hint">操作提示：拖动框选 ROI；点击 ROI 后可用方向键微调，Delete 删除；Ctrl+Z/Ctrl+Y 撤销/重做。</div>
+              <div class="canvas-hint">操作提示：空白处拖动可新建 ROI；拖动框内部可移动，拖动选中框的四边/四角可缩放；Delete 删除；Ctrl+Z/Ctrl+Y 撤销/重做。</div>
             </div>
           </div>
 
@@ -360,6 +365,6 @@
     <script src="vendor/xlsx.full.min.js"></script>
     <script src="vendor/chart.umd.js"></script>
     <script src="vendor/UTIF.js"></script>
-    <script src="app.js?v=2.5.1-r32"></script>
+    <script src="app.js?v=2.5.1-r35"></script>
   </body>
 </html>
