@@ -6,13 +6,13 @@
     },
     {
         "path":  "analysis-core.js",
-        "bytes":  10160,
-        "sha256":  "9f1445f8c01a1d76e33fe2afb8d8bd7071b67301cfbbd33b1fb9b4f2c78e4cec"
+        "bytes":  14618,
+        "sha256":  "61d13ab17fbfc54e9d51baae62d63b7dd84967f1a8a8cf20c2acfd5221fb7837"
     },
     {
         "path":  "app.js",
-        "bytes":  196804,
-        "sha256":  "c92eb9a28f107fb40b34552d26b8caec4d27c427d8fd6bb7143bcf333ac2c4a6"
+        "bytes":  199653,
+        "sha256":  "e7efb960f7ddd571b1e20e3715c8c15f906744d4c4ac20bc0379811c69a45f9d"
     },
     {
         "path":  "icon.svg",
@@ -21,8 +21,8 @@
     },
     {
         "path":  "index.html",
-        "bytes":  24055,
-        "sha256":  "5871d56b33ed25832596fe0b597838dedb010a518bfc1c6dd7788d8bf0f4e962"
+        "bytes":  24735,
+        "sha256":  "4af7458d1447da5015a8b68414c03569164a85386e00783f205625ede579dc77"
     },
     {
         "path":  "manifest.webmanifest",
@@ -32,12 +32,12 @@
     {
         "path":  "privacy.html",
         "bytes":  2964,
-        "sha256":  "2361491d4da729f594d1078b720cef3a52ecfad2cb61cff88cde1d853bfff756"
+        "sha256":  "fd20928dda6484959475a914e2ed5d9bf9e9d15ab1ca47aa46ad14c3d9d43487"
     },
     {
         "path":  "README.md",
-        "bytes":  4429,
-        "sha256":  "b635cb1300dd84a184139f8c23b7dd8ac2c2848dccb71d48e44daa2d4d39e645"
+        "bytes":  8394,
+        "sha256":  "773707c8a82cc4f43f5e3bac07c7a943b171094e9b42fcf91065bf693b3be658"
     },
     {
         "path":  "robots.txt",
@@ -46,8 +46,8 @@
     },
     {
         "path":  "service-worker.js",
-        "bytes":  1656,
-        "sha256":  "22b69064af21a7a3824afb1d6a23dc255f63acf155c0c8f8681888f49aa57c95"
+        "bytes":  1689,
+        "sha256":  "5bae32356dd5c5b1e6eb1ac575bdea5e456fb2c60e04b37a5eacf7a5fe975aec"
     },
     {
         "path":  "styles.css",
@@ -57,7 +57,7 @@
     {
         "path":  "THIRD_PARTY_NOTICES.txt",
         "bytes":  947,
-        "sha256":  "86e9c43ad9d0446ccf0073b9c89fe34e5fab1cd6817706030b03f1cedda47052"
+        "sha256":  "7baec9d2163d1f2d322be8ec64eb0462f968bbd48ed060bc45fbe556f82802cd"
     },
     {
         "path":  "vendor/chart.umd.js",
