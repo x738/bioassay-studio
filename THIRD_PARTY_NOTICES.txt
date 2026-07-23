@@ -1,5 +1,5 @@
 BioAssay Studio - Third-Party Notices
-Version 2.5.0
+Version 2.5.1
 
 This distribution includes the following locally vendored open-source libraries:
 
