@@ -241,6 +241,11 @@
     return Math.round(Number(millimeters) / 25.4 * Number(dpi));
   }
 
+  function canvasUnitsPerPoint(canvasWidth, millimeters) {
+    if (!finitePositive(canvasWidth) || !finitePositive(millimeters)) return 0;
+    return Number(canvasWidth) * 25.4 / (Number(millimeters) * 72);
+  }
+
   function readUint32(bytes, offset) {
     return (((bytes[offset] << 24) >>> 0) + (bytes[offset + 1] << 16) + (bytes[offset + 2] << 8) + bytes[offset + 3]) >>> 0;
   }
@@ -342,6 +347,7 @@
   }
 
   return {
+    canvasUnitsPerPoint,
     classifySaturation,
     dpiToPixelsPerMeter,
     editLaneAnnotations,
