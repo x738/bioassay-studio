@@ -1426,22 +1426,13 @@
     usefulRows.sort((a, b) => b.quality - a.quality);
     const automaticQualityFloor = usefulRows[0].quality * 0.84;
     if (!explicitRowLimit) {
-      let bestPair = null;
-      usefulRows.forEach((row, rowIndex) => usefulRows.slice(rowIndex + 1).forEach(other => {
-        const alignment = rowAlignment(row, other);
-        const centerDistance = Math.abs(row.adjustedCenter - other.adjustedCenter);
-        if (centerDistance < minimumRowDistance || alignment < 0.3) return;
-        const score = alignment * (row.quality + other.quality);
-        if (!bestPair || score > bestPair.score) bestPair = { row, other, alignment, score };
-      }));
-      if (bestPair && Math.min(bestPair.row.quality, bestPair.other.quality) >= usefulRows[0].quality * 0.28) {
-        [bestPair.row, bestPair.other].sort((a, b) => a.adjustedCenter - b.adjustedCenter).forEach(row => {
-          selected.push({ ...row, center: row.adjustedCenter });
-        });
-      } else {
-        const row = usefulRows[0];
-        selected.push({ ...row, center: row.adjustedCenter });
-      }
+      // "0 = automatic" must be conservative: return the dominant physical
+      // band row instead of promoting a second aligned texture/ghost row. A
+      // user who really has two or more vertical bands per lane can request
+      // that row count explicitly. This prevents every one-row blot from being
+      // labelled B1/B2 merely because its background contains a weaker echo.
+      const row = usefulRows[0];
+      selected.push({ ...row, center: row.adjustedCenter });
     } else if (desiredRows > 1) {
       // For multi-row blots, a very dark membrane edge can be stronger than a
       // genuine band row.  Select the mutually aligned row pair first: real
@@ -1766,8 +1757,34 @@
         const eligible = loosePeaks.filter(peak => peak.center > gap.left.center + margin
           && peak.center < gap.right.center - margin
           && !candidates.some(candidate => Math.abs(candidate.center - peak.center) < minimumDistance * 0.72));
-        if (!eligible.length) break;
-        const peak = eligible.sort((a, b) => b.score - a.score)[0];
+        let peak = eligible.sort((a, b) => b.score - a.score)[0];
+        if (!peak && gap.size >= medianGap * 1.78) {
+          // A genuinely weak missing lane may never cross the image-wide loose
+          // threshold. In a conspicuous near-double-pitch gap, inspect only the
+          // central interval using local contrast. This can recover the very
+          // faint middle lane in the seven-lane regression image without
+          // promoting shoulders inside a broad neighbouring band.
+          const gapMidpoint = (gap.left.center + gap.right.center) / 2;
+          const halfWindow = Math.max(minimumWidth, Math.min(medianGap * 0.28, gap.size * 0.17));
+          const searchStart = clamp(Math.ceil(gapMidpoint - halfWindow), 1, profile.length - 2);
+          const searchEnd = clamp(Math.floor(gapMidpoint + halfWindow), searchStart, profile.length - 2);
+          const gapBaseline = movingAverage(profile, Math.max(8, Math.round(medianGap * 0.34)));
+          const gapContrast = profile.map((value, index) => value - gapBaseline[index]);
+          let bestIndex = searchStart;
+          for (let index = searchStart + 1; index <= searchEnd; index += 1) if (gapContrast[index] > gapContrast[bestIndex]) bestIndex = index;
+          const localNoise = sd(gapContrast.slice(searchStart, searchEnd + 1));
+          if (gapContrast[bestIndex] > Math.max(0.28, localNoise * 0.14)) {
+            peak = {
+              center: bestIndex,
+              start: bestIndex,
+              end: bestIndex,
+              peak: profile[bestIndex],
+              score: Math.max(0.001, gapContrast[bestIndex]),
+              weakGapFill: true,
+            };
+          }
+        }
+        if (!peak) break;
         candidates.push({ ...peak, weakGapFill: true });
         additions += 1;
       }
@@ -1908,8 +1925,12 @@
       // profile can then merge the broad lane and still see the outer lane.
       rawBounds = {
         ...rawBounds,
-        x0: expectedLaneCount ? rawBounds.x0 : rowFocus.x0,
-        x1: expectedLaneCount ? rawBounds.x1 : rowFocus.x1,
+        // High-threshold row components are reliable vertical evidence, but a
+        // faint outer lane may be absent from those components. Always retain
+        // the full detected membrane width; otherwise automatic-count mode can
+        // crop seven real lanes down to only the strongest middle three.
+        x0: rawBounds.x0,
+        x1: rawBounds.x1,
         y0: rowFocus.y0,
         y1: rowFocus.y1,
       };
@@ -1922,7 +1943,13 @@
     };
     const effectiveBandsPerLane = bandsPerLane > 0 ? bandsPerLane : Math.max(1, rowFocus?.rows?.length || 1);
     const guidedLanes = rowGuidedLanes(map, bounds, rowFocus, expectedLaneCount, sensitivity);
-    const lanes = guidedLanes.length ? guidedLanes : findLanes(map, bounds, expectedLaneCount, sensitivity);
+    // Without a requested count, component seeds can split one broad band or
+    // omit weak lanes. The full-row area profile is the ImageJ-like evidence
+    // source for automatic lane count; component-guided supplementation is
+    // reserved for a user-supplied count.
+    const lanes = expectedLaneCount && guidedLanes.length
+      ? guidedLanes
+      : findLanes(map, bounds, expectedLaneCount, sensitivity);
     const laneCenters = lanes.map(lane => (lane.x0 + lane.x1) / 2);
     rowFocus = refineRowFocusFromLanes(map, rowFocus, lanes);
     const lanePitches = laneCenters.slice(1).map((center, index) => center - laneCenters[index]).filter(value => value > 0);
@@ -3149,6 +3176,25 @@
     return figure.layouts.find(layout => point.x >= layout.frame.x && point.x <= layout.frame.x + layout.frame.width && point.y >= layout.frameY && point.y <= layout.frameY + layout.frame.height);
   }
 
+  function figureSourcePositionAtCanvasX(layout, canvasX) {
+    if (!layout?.mapSourcePoint || !Number.isFinite(layout.sourceWidth) || layout.sourceWidth <= 0) return 0;
+    const canvasPositionForSourceX = sourceX => {
+      const sourceY = layout.bandLine.slope * sourceX + layout.bandLine.intercept;
+      const mapped = layout.mapSourcePoint(sourceX, sourceY);
+      return layout.imageX + mapped.x * layout.imageScale;
+    };
+    let low = 0;
+    let high = layout.sourceWidth;
+    const ascending = canvasPositionForSourceX(high) >= canvasPositionForSourceX(low);
+    for (let iteration = 0; iteration < 28; iteration += 1) {
+      const middle = (low + high) / 2;
+      const displayed = canvasPositionForSourceX(middle);
+      if ((displayed < canvasX) === ascending) low = middle;
+      else high = middle;
+    }
+    return clamp(((low + high) / 2) / layout.sourceWidth, 0, 1);
+  }
+
   function startFigureManualEdit() {
     if (!figure.images.length) return toastMessage('请先上传 WB 图。');
     figure.frameEditing = false;
@@ -3243,8 +3289,7 @@
       if (!layout) return;
       const entry = figure.images[layout.index];
       ensureManualCenters(entry, figureExpectedLaneCount(entry));
-      const sourceX = layout.cropX + (point.x - layout.imageX) / layout.imageWidth * layout.cropWidth;
-      const normalized = clamp(sourceX / layout.sourceWidth, 0, 1);
+      const normalized = figureSourcePositionAtCanvasX(layout, point.x);
       if (figure.editTool === 'add') {
         pushHistory('增加手动泳道线');
         const previousCount = entry.manualCenters.length;
@@ -3293,8 +3338,11 @@
       const entry = figure.images[figure.dragging.index];
       if (!layout || !entry?.manualCenters?.length) return;
       const point = figureCanvasPoint(event);
-      const sourceX = layout.cropX + (point.x - layout.imageX) / layout.imageWidth * layout.cropWidth;
-      entry.manualCenters[figure.dragging.centerIndex] = clamp(sourceX / layout.sourceWidth, 0, 1);
+      const centerIndex = figure.dragging.centerIndex;
+      const minimumGap = 0.002;
+      const lower = centerIndex > 0 ? entry.manualCenters[centerIndex - 1] + minimumGap : 0;
+      const upper = centerIndex < entry.manualCenters.length - 1 ? entry.manualCenters[centerIndex + 1] - minimumGap : 1;
+      entry.manualCenters[centerIndex] = clamp(figureSourcePositionAtCanvasX(layout, point.x), lower, upper);
       renderWbFigure();
     });
     const finish = () => {
@@ -3324,8 +3372,7 @@
       if (!layout) return;
       const entry = figure.images[layout.index];
       if (!entry?.manualCenters?.length) return;
-      const sourceX = layout.cropX + (point.x - layout.imageX) / layout.imageWidth * layout.cropWidth;
-      const normalized = clamp(sourceX / layout.sourceWidth, 0, 1);
+      const normalized = figureSourcePositionAtCanvasX(layout, point.x);
       const nearestIndex = entry.manualCenters.reduce((bestIndex, center, index) => Math.abs(center - normalized) < Math.abs(entry.manualCenters[bestIndex] - normalized) ? index : bestIndex, 0);
       if (Math.abs(entry.manualCenters[nearestIndex] - normalized) > 0.05) return;
       figure.selectedGuide = { index: layout.index, centerIndex: nearestIndex };
@@ -3601,6 +3648,34 @@
     return { canvas: frameCanvas, scale, offsetX, offsetY, drawWidth, drawHeight };
   }
 
+  function figurePhysicalWidthMillimeters() {
+    const template = $('#figureTemplate').value;
+    if (template === 'single') return 85;
+    if (template === 'double') return 180;
+    return clamp(number($('#figureCustomWidthMm').value, 180), 20, 500);
+  }
+
+  function figureTypography() {
+    const millimeters = figurePhysicalWidthMillimeters();
+    const canvasUnitsPerPoint = core.canvasUnitsPerPoint(1200, millimeters);
+    const proteinPointSize = clamp(number($('#figureProteinFontSize').value, 13), 6, 36);
+    const massPointSize = clamp(number($('#figureMassFontSize').value, 11), 6, 36);
+    const valuePointSize = clamp(number($('#figureValueFontSize').value, 9), 6, 24);
+    const lanePointSize = clamp(number($('#figureLaneFontSize').value, 10), 6, 24);
+    return {
+      millimeters,
+      canvasUnitsPerPoint,
+      proteinPointSize,
+      massPointSize,
+      valuePointSize,
+      lanePointSize,
+      proteinFontSize: proteinPointSize * canvasUnitsPerPoint,
+      massFontSize: massPointSize * canvasUnitsPerPoint,
+      valueFontSize: valuePointSize * canvasUnitsPerPoint,
+      laneFontSize: lanePointSize * canvasUnitsPerPoint,
+    };
+  }
+
   function renderWbFigure(showGuides = figure.editing) {
     if (!figure.images.length) {
       drawFigureEmptyState();
@@ -3620,10 +3695,9 @@
     const autoDeskew = $('#figureAutoDeskew').checked;
     const cropPadding = clamp(Math.round(number($('#figureCropPadding').value, 12)), 2, 80);
     const backgroundStrength = clamp(Math.round(number($('#figureBackgroundStrength').value, 62)), 0, 100);
-    const proteinFontSize = clamp(Math.round(number($('#figureProteinFontSize').value, 30)), 12, 52);
-    const massFontSize = clamp(Math.round(number($('#figureMassFontSize').value, 25)), 10, 52);
-    const valueFontSize = clamp(Math.round(number($('#figureValueFontSize').value, 20)), 10, 42);
-    const laneFontSize = clamp(Math.round(number($('#figureLaneFontSize').value, 17)), 10, 42);
+    const { proteinFontSize, massFontSize, valueFontSize, laneFontSize } = figureTypography();
+    const laneLabelAngleDegrees = -clamp(27.5 + Math.max(0, laneFontSize - 20) * 1.2, 27.5, 58);
+    const laneLabelAngle = laneLabelAngleDegrees * Math.PI / 180;
     const panelGap = clamp(Math.round(number($('#figurePanelGap').value, 18)), 4, 100);
     const frameWidth = clamp(Math.round(number($('#figureFrameWidth').value, 840)), 260, 920);
     const frameHeight = clamp(Math.round(number($('#figureFrameHeight').value, 78)), 32, 220);
@@ -3637,8 +3711,18 @@
       const hasValues = showValues && annotations.values.length > 0;
       const needsAbove = (hasValues && valuePosition === 'above') || (showLaneNamesForPanel && annotations.names.length && lanePosition === 'above');
       const needsBelow = (hasValues && valuePosition === 'below') || (showLaneNamesForPanel && annotations.names.length && lanePosition === 'below');
-      const aboveSpace = needsAbove ? 78 : 18;
-      const belowSpace = (needsBelow ? 102 : 18) + (showGroupsForPanel ? groupLabels.length * 24 : 0);
+      const longestLaneName = annotations.names.reduce((length, name) => Math.max(length, [...name].length), 0);
+      const laneNameReach = showLaneNamesForPanel && annotations.names.length
+        ? clamp(Math.round(longestLaneName * laneFontSize * 0.26 + laneFontSize * 1.1), 34, 176)
+        : 0;
+      const sameAnnotationSide = hasValues && showLaneNamesForPanel && annotations.names.length && valuePosition === lanePosition;
+      const valueReach = hasValues
+        ? 18 + valueFontSize + (sameAnnotationSide ? Math.max(26, laneFontSize * 1.8) : 0)
+        : 0;
+      const nameReach = laneNameReach ? 34 + laneNameReach : 0;
+      const aboveSpace = needsAbove ? Math.max(78, valuePosition === 'above' ? valueReach + 12 : 0, lanePosition === 'above' ? nameReach + 12 : 0) : 18;
+      const belowSpace = (needsBelow ? Math.max(102, valuePosition === 'below' ? valueReach + 12 : 0, lanePosition === 'below' ? nameReach + 12 : 0) : 18)
+        + (showGroupsForPanel ? groupLabels.length * 24 : 0);
       const frameY = layoutCursor + aboveSpace;
       layoutCursor = frameY + frame.height + belowSpace + panelGap;
       return { ...annotations, showLaneNamesForPanel, showGroupsForPanel, frameY };
@@ -3696,8 +3780,11 @@
         const sourceY = Number.isFinite(candidate.y) ? candidate.y + Math.max(candidate.height || 0, 1) / 2 : bandLine.slope * sourceX + bandLine.intercept;
         return clamp(frame.x + composed.offsetX + strip.mapSourcePoint(sourceX, sourceY).x * composed.scale, frame.x, frame.x + frame.width);
       });
-      const valueLevels = annotationLevels(laneXs, Math.max(40, valueFontSize * 2.8));
-      const nameLevels = annotationLevels(laneXs, Math.max(55, laneFontSize * 4.4));
+      // Yellow guides, values and lane names share one x-coordinate array.
+      // Keep each annotation type on one fixed baseline; increasing the font
+      // must never stagger labels or detach them from their physical lane.
+      const valueLevels = new Array(laneXs.length).fill(0);
+      const nameLevels = new Array(laneXs.length).fill(0);
       candidates.forEach((candidate, laneIndex) => {
         const x = laneXs[laneIndex];
         if (showValues && values[laneIndex] !== undefined) {
@@ -3715,10 +3802,10 @@
           const direction = lanePosition === 'above' ? -1 : 1;
           const base = lanePosition === 'above' ? frameY - 34 : frameY + frame.height + 38;
           figureCtx.translate(x, base + direction * nameLevels[laneIndex] * 25);
-          figureCtx.rotate(-0.48);
+          figureCtx.rotate(laneLabelAngle);
           figureCtx.fillStyle = '#111827';
           figureCtx.font = `600 ${laneFontSize}px "Times New Roman", serif`;
-          figureCtx.textAlign = 'right';
+          figureCtx.textAlign = 'center';
           figureCtx.fillText(laneNames[laneIndex], 0, 0);
           figureCtx.restore();
         }
@@ -3768,7 +3855,7 @@
         [[frame.x, frameY], [frame.x + frame.width, frameY], [frame.x, frameY + frame.height], [frame.x + frame.width, frameY + frame.height]].forEach(([x, y]) => figureCtx.fillRect(x - 5, y - 5, 10, 10));
         figureCtx.restore();
       }
-      figure.layouts.push({ index, frameY, frame: { ...frame }, imageX: frame.x + composed.offsetX, imageWidth: composed.drawWidth, imageScale: composed.scale, sourceWidth, cropX: strip.x0, cropWidth: strip.cropWidth, candidates, stripCanvas: composed.canvas, rawStripCanvas: strip.canvas, laneXs, laneNames, values, showLaneNamesForPanel, showGroupsForPanel, valueLevels, nameLevels, panelLetter, massText, entry, compositionMode, proteinSide, massSide, valuePosition, lanePosition, proteinFontSize, massFontSize });
+      figure.layouts.push({ index, frameY, frame: { ...frame }, imageX: frame.x + composed.offsetX, imageWidth: composed.drawWidth, imageScale: composed.scale, sourceWidth, cropX: strip.x0, cropWidth: strip.cropWidth, mapSourcePoint: strip.mapSourcePoint, bandLine, candidates, stripCanvas: composed.canvas, rawStripCanvas: strip.canvas, laneXs, laneNames, values, showLaneNamesForPanel, showGroupsForPanel, valueLevels, nameLevels, laneLabelAngleDegrees, panelLetter, massText, entry, compositionMode, proteinSide, massSide, valuePosition, lanePosition, proteinFontSize, massFontSize });
       const status = $(`#figureDetect-${index}`);
       if (status) status.textContent = statuses[statuses.length - 1];
     });
@@ -3814,8 +3901,7 @@
   function figureExportSettings() {
     const template = $('#figureTemplate').value;
     const dpi = clamp(Math.round(number($('#figureDpi').value, 600)), 72, 1200);
-    const customWidth = clamp(number($('#figureCustomWidthMm').value, 180), 20, 500);
-    const millimeters = template === 'single' ? 85 : template === 'double' ? 180 : customWidth;
+    const millimeters = figurePhysicalWidthMillimeters();
     const width = core.pixelsForPhysicalWidth(millimeters, dpi);
     const height = Math.max(1, Math.round(width * figureCanvas.height / Math.max(1, figureCanvas.width)));
     return { template, dpi, millimeters, width, height };
@@ -3825,7 +3911,7 @@
     const settings = figureExportSettings();
     const customWidth = $('#figureCustomWidthMm');
     customWidth.disabled = settings.template !== 'custom';
-    $('#figureExportInfo').textContent = `${settings.dpi} DPI · ${fmt(settings.millimeters, 1)} mm · ${settings.width} × ${settings.height} px；PNG 文件会写入 ${settings.dpi} DPI 物理分辨率元数据。`;
+    $('#figureExportInfo').textContent = `${settings.dpi} DPI · ${fmt(settings.millimeters, 1)} mm · ${settings.width} × ${settings.height} px；字号使用真实 pt，PNG 会写入 ${settings.dpi} DPI 物理分辨率元数据。`;
     $('#exportWbFigure').textContent = `导出 ${settings.dpi} DPI PNG`;
   }
 
@@ -3869,15 +3955,12 @@
     const lanePosition = $('#figureLanePosition').value;
     const proteinSide = $('#figureProteinSide').value;
     const massSide = $('#figureMassSide').value;
-    const proteinFontSize = clamp(Math.round(number($('#figureProteinFontSize').value, 30)), 12, 52);
-    const massFontSize = clamp(Math.round(number($('#figureMassFontSize').value, 25)), 10, 52);
-    const valueFontSize = clamp(Math.round(number($('#figureValueFontSize').value, 20)), 10, 42);
-    const laneFontSize = clamp(Math.round(number($('#figureLaneFontSize').value, 17)), 10, 42);
+    const { proteinFontSize, massFontSize, valueFontSize, laneFontSize } = figureTypography();
     const { template, millimeters } = figureExportSettings();
     const physicalWidth = `${millimeters}mm`;
     const parts = [`<svg xmlns="http://www.w3.org/2000/svg" width="${physicalWidth}" viewBox="0 0 ${figureCanvas.width} ${figureCanvas.height}">`, '<rect width="100%" height="100%" fill="white"/>'];
     figure.layouts.forEach(layout => {
-      const { frame, frameY, laneXs, laneNames, values, showLaneNamesForPanel, showGroupsForPanel, valueLevels, nameLevels, entry } = layout;
+      const { frame, frameY, laneXs, laneNames, values, showLaneNamesForPanel, showGroupsForPanel, valueLevels, nameLevels, laneLabelAngleDegrees, entry } = layout;
       parts.push(`<image href="${layout.stripCanvas.toDataURL('image/png')}" x="${frame.x}" y="${frameY}" width="${frame.width}" height="${frame.height}" preserveAspectRatio="none"/>`);
       parts.push(`<rect x="${frame.x}" y="${frameY}" width="${frame.width}" height="${frame.height}" fill="none" stroke="#101010" stroke-width="3"/>`);
       const sameSide = proteinSide === massSide;
@@ -3898,7 +3981,7 @@
           const direction = lanePosition === 'above' ? -1 : 1;
           const base = lanePosition === 'above' ? frameY - 34 : frameY + frame.height + 38;
           const y = base + direction * nameLevels[laneIndex] * 25;
-          parts.push(`<text x="${x}" y="${y}" text-anchor="end" dominant-baseline="middle" transform="rotate(-27.5 ${x} ${y})" font-family="Times New Roman" font-size="${laneFontSize}" font-weight="600">${escapeHtml(laneNames[laneIndex])}</text>`);
+          parts.push(`<text x="${x}" y="${y}" text-anchor="middle" dominant-baseline="middle" transform="rotate(${laneLabelAngleDegrees} ${x} ${y})" font-family="Times New Roman" font-size="${laneFontSize}" font-weight="600">${escapeHtml(laneNames[laneIndex])}</text>`);
         }
       });
       if (showGroupsForPanel) groups.forEach((group, groupIndex) => {
