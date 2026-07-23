@@ -9,7 +9,7 @@
     <link rel="icon" href="icon.svg" type="image/svg+xml" />
     <link rel="manifest" href="manifest.webmanifest" />
     <title>BioAssay Studio | qPCR 与 WB 定量</title>
-    <link rel="stylesheet" href="styles.css?v=2.5.1-r35" />
+    <link rel="stylesheet" href="styles.css?v=2.5.1-r36" />
   </head>
   <body>
     <header class="app-header">
@@ -270,8 +270,8 @@
               <label>归一化数值（与泳道顺序一致）
                 <textarea id="figureValues" rows="5" placeholder="1.00, 0.76, 0.95…\n可手工输入，或从双图结果带入"></textarea>
               </label>
-              <label>预期泳道/条带数 <span class="field-hint">不含 Marker</span>
-                <input id="figureLaneCount" type="number" min="1" max="96" placeholder="由名称数量决定" />
+              <label>预期泳道/条带数 <span class="field-hint">可选，不含 Marker</span>
+                <input id="figureLaneCount" type="number" min="1" max="96" placeholder="留空自动识别；名称不控制数量" />
               </label>
               <label>忽略左侧 Marker 区域（%） <span class="field-hint">0 表示不忽略</span>
                 <input id="figureMarkerPercent" type="number" min="0" max="40" step="1" value="0" />
@@ -365,6 +365,6 @@
     <script src="vendor/xlsx.full.min.js"></script>
     <script src="vendor/chart.umd.js"></script>
     <script src="vendor/UTIF.js"></script>
-    <script src="app.js?v=2.5.1-r35"></script>
+    <script src="app.js?v=2.5.1-r36"></script>
   </body>
 </html>
