@@ -46,6 +46,15 @@
     return Number(currentVolume) * Number(baselineReferenceSignal) / Number(currentReferenceSignal);
   }
 
+  function classifySaturation(nearClippedFraction, hardClippedFraction, longestRunFraction) {
+    const near = Math.max(0, Number(nearClippedFraction) || 0);
+    const hard = Math.max(0, Number(hardClippedFraction) || 0);
+    const run = Math.max(0, Number(longestRunFraction) || 0);
+    if (near >= 0.12 || hard >= 0.04 || (hard >= 0.01 && run >= 0.08)) return 'bad';
+    if (near >= 0.01 || hard >= 0.003) return 'warn';
+    return 'good';
+  }
+
   function editLaneAnnotations(names, values, action, index) {
     const nextNames = Array.from(names || [], value => String(value));
     const nextValues = Array.from(values || [], value => String(value));
@@ -333,6 +342,7 @@
   }
 
   return {
+    classifySaturation,
     dpiToPixelsPerMeter,
     editLaneAnnotations,
     pixelsForPhysicalWidth,

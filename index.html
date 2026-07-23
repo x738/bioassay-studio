@@ -9,7 +9,7 @@
     <link rel="icon" href="icon.svg" type="image/svg+xml" />
     <link rel="manifest" href="manifest.webmanifest" />
     <title>BioAssay Studio | qPCR 与 WB 定量</title>
-    <link rel="stylesheet" href="styles.css?v=2.5.0-r3" />
+    <link rel="stylesheet" href="styles.css?v=2.5.1-r26" />
   </head>
   <body>
     <header class="app-header">
@@ -112,8 +112,11 @@
                 <label>忽略左侧 Marker 区域（%） <span class="field-hint">0 表示不忽略</span>
                   <input id="autoMarkerPercent" type="number" min="0" max="40" step="1" value="0" />
                 </label>
+                <label>条带左右留白（px） <span class="field-hint">建议 2–6；越小越紧凑</span>
+                  <input id="autoEdgePadding" type="number" min="0" max="30" step="1" value="4" />
+                </label>
                 <div class="compact-control-grid">
-                  <label>每泳道最多条带<input id="autoBandsPerLane" type="number" min="1" max="8" value="1" /></label>
+                  <label>每泳道条带数 <span class="field-hint">0 = 自动判断</span><input id="autoBandsPerLane" type="number" min="0" max="8" value="0" /></label>
                   <label>纵向最小峰距（px）<input id="autoBandGap" type="number" min="2" max="160" value="12" /></label>
                 </div>
                 <label class="checkbox-row"><input id="autoBackground" type="checkbox" checked />添加自动背景 ROI</label>
@@ -140,10 +143,17 @@
 
             <div class="canvas-column">
               <div id="wbDropzone" class="canvas-frame" tabindex="0" aria-label="Western blot 图像画布">
-                <canvas id="wbCanvas"></canvas>
-                <div id="wbEmptyState" class="wb-empty-state">
-                  <strong>拖入 Western blot 图片</strong>
-                  <span>或点击“打开 WB 图片”选择 PNG、JPG、TIFF 转换后的图片</span>
+                <div id="wbViewToolbar" class="wb-view-toolbar">
+                  <button id="focusWbView" type="button" disabled>聚焦识别区域</button>
+                  <button id="resetWbView" type="button" disabled>显示完整原图</button>
+                  <span id="wbViewNote">完整原图</span>
+                </div>
+                <div id="wbViewport" class="wb-analysis-viewport">
+                  <canvas id="wbCanvas"></canvas>
+                  <div id="wbEmptyState" class="wb-empty-state">
+                    <strong>拖入 Western blot 图片</strong>
+                    <span>或点击“打开 WB 图片”选择 PNG、JPG、TIFF 转换后的图片</span>
+                  </div>
                 </div>
               </div>
               <div class="canvas-hint">操作提示：拖动框选 ROI；点击 ROI 后可用方向键微调，Delete 删除；Ctrl+Z/Ctrl+Y 撤销/重做。</div>
@@ -154,13 +164,13 @@
             <div class="section-heading">
               <div>
                 <h3>灰度定量结果</h3>
-                <p>积分灰度使用 ROI 内每个像素的平均强度 × 面积计算。</p>
+                <p>ImageJ 口径：IntDen = ROI 平均灰度 × 面积；归一化使用背景校正后的 IntDen。</p>
               </div>
             </div>
             <div class="table-wrap wb-table-wrap">
               <table>
-                <thead><tr><th>类型</th><th>来源</th><th>名称</th><th>分组</th><th>位置 (px)</th><th>面积</th><th>平均灰度</th><th>积分灰度</th><th>背景强度</th><th>背景扣除</th><th>SNR</th><th>归一化</th><th>QC</th><th></th></tr></thead>
-                <tbody id="wbResultsBody"><tr class="empty-row"><td colspan="14">尚未载入图片或绘制 ROI。</td></tr></tbody>
+                <thead><tr><th>类型</th><th>来源</th><th>名称</th><th>分组</th><th>位置 (px)</th><th>面积</th><th>平均灰度</th><th>最小灰度</th><th>最大灰度</th><th>IntDen</th><th>背景强度</th><th>背景校正 IntDen</th><th>SNR</th><th>归一化</th><th>QC</th><th></th></tr></thead>
+                <tbody id="wbResultsBody"><tr class="empty-row"><td colspan="16">尚未载入图片或绘制 ROI。</td></tr></tbody>
               </table>
             </div>
             <section id="wbProfilePanel" class="wb-profile-panel">
@@ -211,12 +221,14 @@
                 <label>自动框选灵敏度 <span class="range-value" id="pairSensitivityValue">75</span><input id="pairSensitivity" type="range" min="35" max="90" value="75" /></label>
                 <label>预期泳道数 <span class="field-hint">弱带建议填写</span><input id="pairLaneCount" type="number" min="1" max="96" placeholder="留空自动" /></label>
                 <label>忽略左侧 Marker（%） <span class="field-hint">两图一致</span><input id="pairMarkerPercent" type="number" min="0" max="40" step="1" value="0" /></label>
+                <label>条带左右留白（px） <span class="field-hint">两图一致</span><input id="pairEdgePadding" type="number" min="0" max="30" step="1" value="4" /></label>
               </div>
               <div class="pair-load-calibration">
                 <h4>内参上样量校准</h4>
                 <p>目标：让每个泳道的内参背景扣除灰度与基准泳道一致。</p>
                 <label>默认当前上样量（µL）<input id="pairDefaultLoadVolume" type="number" min="0.01" step="0.1" value="20" /></label>
                 <button id="applyPairDefaultLoad" type="button">应用默认量到全部泳道</button>
+                <label class="checkbox-row"><input id="pairAllowSaturatedCalibration" type="checkbox" />明确饱和时仍生成探索性建议量（不建议用于正式结论）</label>
                 <p id="pairCalibrationNote" class="pair-calibration-note">建议量仅适用于内参未饱和、灰度与上样量在线性范围内且样品浓度可比的情况。</p>
               </div>
               <div id="pairQuickStats" class="pair-quick-stats"><div><b>0</b><span>目的蛋白条带</span></div><div><b>0</b><span>内参条带</span></div></div>
@@ -244,6 +256,9 @@
           <div class="figure-layout">
             <aside class="figure-controls">
               <h3>全局标注</h3>
+              <label>泳道标注范围
+                <select id="figureLaneScope"><option value="shared">整组图片共用一套泳道名称 / 数值</option><option value="per-image">每张图片分别设置泳道名称 / 数值</option></select>
+              </label>
               <label>泳道名称（按左→右顺序）
                 <textarea id="figureLaneNames" rows="6" placeholder="Control, Model, Treatment-1…\n可用逗号、换行或分号分隔"></textarea>
               </label>
@@ -257,18 +272,31 @@
                 <input id="figureMarkerPercent" type="number" min="0" max="40" step="1" value="0" />
               </label>
               <div class="figure-font-grid">
-                <label>蛋白名 / kDa 字号<input id="figureSideFontSize" type="number" min="12" max="52" value="30" /></label>
+                <label>蛋白名字号<input id="figureProteinFontSize" type="number" min="12" max="52" value="30" /></label>
+                <label>kDa 字号<input id="figureMassFontSize" type="number" min="10" max="52" value="25" /></label>
                 <label>归一化数值字号<input id="figureValueFontSize" type="number" min="10" max="42" value="20" /></label>
                 <label>泳道名称字号<input id="figureLaneFontSize" type="number" min="10" max="42" value="17" /></label>
               </div>
+              <div class="figure-output-grid">
+                <label>排版模式<select id="figureCompositionMode"><option value="panels">多面板（显示 A/B/C…）</option><option value="integrated">完整图（无面板角标）</option></select></label>
+                <label>归一化数值位置<select id="figureValuePosition"><option value="above">黑框上方</option><option value="below">黑框下方</option></select></label>
+                <label>泳道名称位置<select id="figureLanePosition"><option value="below">黑框下方</option><option value="above">黑框上方</option></select></label>
+                <label>蛋白名位置<select id="figureProteinSide"><option value="left">黑框左侧</option><option value="right">黑框右侧</option></select></label>
+                <label>kDa 位置<select id="figureMassSide"><option value="right">黑框右侧</option><option value="left">黑框左侧</option></select></label>
+                <label>图间距（px）<input id="figurePanelGap" type="number" min="4" max="100" value="18" /></label>
+              </div>
               <div class="figure-crop-grid">
                 <label>条带上下留白（px）<input id="figureCropPadding" type="number" min="2" max="80" value="12" /></label>
+                <div class="figure-frame-size-grid">
+                  <label>黑框宽度（px）<input id="figureFrameWidth" type="number" min="260" max="920" value="840" /></label>
+                  <label>黑框高度（px）<input id="figureFrameHeight" type="number" min="32" max="220" value="78" /></label>
+                </div>
                 <label>去背景强度（0–100）<input id="figureBackgroundStrength" type="number" min="0" max="100" value="62" disabled /></label>
                 <label class="checkbox-row"><input id="figureWhiteBackground" type="checkbox" />背景转为白色（可选，默认保留原背景）</label>
                 <label class="checkbox-row"><input id="figurePreserveColor" type="checkbox" checked disabled />严格保留条带原始颜色与灰阶</label>
                 <label class="checkbox-row"><input id="figureAutoDeskew" type="checkbox" checked />自动将条带校正到同一水平线</label>
               </div>
-              <label class="checkbox-row"><input id="figureShowValues" type="checkbox" checked />在条带上方显示归一化值</label>
+              <label class="checkbox-row"><input id="figureShowValues" type="checkbox" checked />显示归一化值</label>
               <label>分组标题（标题:起始-结束，每行一组）
                 <textarea id="figureGroupLabels" rows="4" placeholder="Control:1-2&#10;Treatment:3-7"></textarea>
               </label>
@@ -289,8 +317,10 @@
                 </div>
                 <span id="figureGuideSelection" class="figure-guide-selection">尚未选择黄线</span>
                 <button id="clearFigureManual" class="text-action" type="button">恢复自动定位</button>
+                <button id="toggleFigureFrame" class="button button-ghost" type="button">调整黑框大小</button>
+                <span id="figureFrameSize" class="figure-guide-selection">黑框：840 × 78 px</span>
               </div>
-              <p id="figureEditHint" class="figure-edit-hint">自动识别有误时，开启手动校正；可新增、拖动或删除黄线，泳道名称与归一化数值会同步增删。</p>
+              <p id="figureEditHint" class="figure-edit-hint">黄线只定位泳道，不改变裁剪、缩放或条带形状；图片放大请使用每张图的“图像缩放”。</p>
               <p id="figureStatus" class="figure-status">上传一张或多张 WB 图后开始排版。每张图的黑框尺寸固定一致。</p>
             </aside>
 
@@ -301,7 +331,8 @@
 
             <aside class="figure-image-settings">
               <h3>每张图图注</h3>
-              <p>蛋白名称和分子量会分别放在黑框左侧与右侧。</p>
+              <p>先选择要编辑的图片，再填写蛋白名、分子量、角度和缩放；切换图片不会丢失内容。</p>
+              <label>当前编辑图片<select id="figureImageSelect" disabled><option>尚未上传图片</option></select></label>
               <div id="figurePanelInputs" class="figure-panel-inputs"><p class="muted">尚未上传图片。</p></div>
             </aside>
           </div>
@@ -311,7 +342,7 @@
     </main>
 
     <footer class="app-footer">
-      <div><strong>BioAssay Studio v2.5.0</strong><span>科研数据在当前浏览器中处理，网站不接收上传内容。</span></div>
+      <div><strong>BioAssay Studio v2.5.1</strong><span>科研数据在当前浏览器中处理，网站不接收上传内容。</span></div>
       <nav aria-label="网站信息"><a href="privacy.html">隐私与数据处理</a><a href="THIRD_PARTY_NOTICES.txt">第三方许可</a><a href="README.md">使用说明</a></nav>
     </footer>
 
@@ -325,10 +356,10 @@
     </dialog>
 
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
-    <script src="analysis-core.js?v=2.5.0-r3"></script>
+    <script src="analysis-core.js?v=2.5.1-r1"></script>
     <script src="vendor/xlsx.full.min.js"></script>
     <script src="vendor/chart.umd.js"></script>
     <script src="vendor/UTIF.js"></script>
-    <script src="app.js?v=2.5.0-r3"></script>
+    <script src="app.js?v=2.5.1-r26"></script>
   </body>
 </html>

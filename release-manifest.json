@@ -6,13 +6,13 @@
     },
     {
         "path":  "analysis-core.js",
-        "bytes":  14618,
-        "sha256":  "61d13ab17fbfc54e9d51baae62d63b7dd84967f1a8a8cf20c2acfd5221fb7837"
+        "bytes":  15089,
+        "sha256":  "9333b327f4d72fe895bbc4595286ffe9104d3d9d0668b79f62ec787645291e08"
     },
     {
         "path":  "app.js",
-        "bytes":  199653,
-        "sha256":  "e7efb960f7ddd571b1e20e3715c8c15f906744d4c4ac20bc0379811c69a45f9d"
+        "bytes":  260593,
+        "sha256":  "a6565909b68b02283c2d55b5676b22489ff8dc4261c03735e0ec73b9cb633e22"
     },
     {
         "path":  "icon.svg",
@@ -21,8 +21,8 @@
     },
     {
         "path":  "index.html",
-        "bytes":  24735,
-        "sha256":  "4af7458d1447da5015a8b68414c03569164a85386e00783f205625ede579dc77"
+        "bytes":  28099,
+        "sha256":  "37af7df7e717fc044d931f66f464b27f2a27a4a1f6c675746aaace4edf5aaaa2"
     },
     {
         "path":  "manifest.webmanifest",
@@ -32,12 +32,12 @@
     {
         "path":  "privacy.html",
         "bytes":  2964,
-        "sha256":  "fd20928dda6484959475a914e2ed5d9bf9e9d15ab1ca47aa46ad14c3d9d43487"
+        "sha256":  "daaddca0e474b0f005049b623869b8a215c6c1dad6073c53a77a1f1e5e01b081"
     },
     {
         "path":  "README.md",
-        "bytes":  8394,
-        "sha256":  "773707c8a82cc4f43f5e3bac07c7a943b171094e9b42fcf91065bf693b3be658"
+        "bytes":  8936,
+        "sha256":  "a2c1294f49ec4cf34b3203bea4180b8c52ea14afc6b695d636bc8ab245cd5684"
     },
     {
         "path":  "robots.txt",
@@ -46,18 +46,18 @@
     },
     {
         "path":  "service-worker.js",
-        "bytes":  1689,
-        "sha256":  "5bae32356dd5c5b1e6eb1ac575bdea5e456fb2c60e04b37a5eacf7a5fe975aec"
+        "bytes":  1692,
+        "sha256":  "1d8e1b2085d9b536857eed90e23aeabb807e270364fc463df80dd996fcd7998c"
     },
     {
         "path":  "styles.css",
-        "bytes":  29394,
-        "sha256":  "b2348e5f7ad44d68eab7fecf4b9e79e18b1958b18f4592ae09801d08cf82a0c7"
+        "bytes":  31073,
+        "sha256":  "9dc1cadba8b032de01f1b3ddf62df434abd952d8ae642eea99ec2e9c33b56a1f"
     },
     {
         "path":  "THIRD_PARTY_NOTICES.txt",
         "bytes":  947,
-        "sha256":  "7baec9d2163d1f2d322be8ec64eb0462f968bbd48ed060bc45fbe556f82802cd"
+        "sha256":  "337ced14442a2459d98e3d8af9965be713cc08e6194519562c5e112ca158a11a"
     },
     {
         "path":  "vendor/chart.umd.js",
