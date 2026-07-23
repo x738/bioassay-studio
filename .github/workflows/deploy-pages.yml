@@ -29,7 +29,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p _site/vendor
-          cp .nojekyll index.html styles.css analysis-core.js app.js README.md privacy.html manifest.webmanifest icon.svg service-worker.js robots.txt THIRD_PARTY_NOTICES.txt release-manifest.json _site/
+          cp .nojekyll index.html styles.css experiment-library.css analysis-core.js experiment-core.js app.js experiment-library.js README.md privacy.html manifest.webmanifest icon.svg service-worker.js robots.txt THIRD_PARTY_NOTICES.txt release-manifest.json _site/
           cp vendor/chart.umd.js vendor/xlsx.full.min.js vendor/UTIF.js vendor/CHARTJS-LICENSE.txt vendor/SHEETJS-LICENSE.txt vendor/UTIF-LICENSE.txt _site/vendor/
 
       - name: 配置 GitHub Pages

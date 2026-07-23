@@ -18,6 +18,87 @@
     return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
   }
 
+  function numericReplicates(values) {
+    return Array.from(values || []).map(value => {
+      if (value === null || value === undefined || String(value).trim() === '') return NaN;
+      return Number(String(value).replace(',', '.'));
+    }).filter(Number.isFinite);
+  }
+
+  function replicateSummary(values) {
+    const numbers = numericReplicates(values);
+    if (!numbers.length) return { n: 0, mean: NaN, sd: NaN, cv: NaN };
+    const average = numbers.reduce((sum, value) => sum + value, 0) / numbers.length;
+    const variance = numbers.length > 1
+      ? numbers.reduce((sum, value) => sum + ((value - average) ** 2), 0) / (numbers.length - 1)
+      : 0;
+    const sd = Math.sqrt(Math.max(0, variance));
+    return {
+      n: numbers.length,
+      mean: average,
+      sd,
+      cv: average === 0 ? (sd === 0 ? 0 : Infinity) : Math.abs(sd / average) * 100,
+    };
+  }
+
+  function linearRegression(points, { forceOrigin = false } = {}) {
+    const rows = Array.from(points || []).map(point => ({
+      x: Number(point?.x),
+      y: Number(point?.y),
+    })).filter(point => Number.isFinite(point.x) && Number.isFinite(point.y));
+    if (rows.length < 2) return { n: rows.length, slope: NaN, intercept: NaN, r2: NaN, predictions: [] };
+    const meanX = rows.reduce((sum, point) => sum + point.x, 0) / rows.length;
+    const meanY = rows.reduce((sum, point) => sum + point.y, 0) / rows.length;
+    let slope;
+    let intercept;
+    if (forceOrigin) {
+      const denominator = rows.reduce((sum, point) => sum + point.x ** 2, 0);
+      slope = denominator ? rows.reduce((sum, point) => sum + point.x * point.y, 0) / denominator : NaN;
+      intercept = 0;
+    } else {
+      const denominator = rows.reduce((sum, point) => sum + ((point.x - meanX) ** 2), 0);
+      slope = denominator
+        ? rows.reduce((sum, point) => sum + (point.x - meanX) * (point.y - meanY), 0) / denominator
+        : NaN;
+      intercept = Number.isFinite(slope) ? meanY - slope * meanX : NaN;
+    }
+    const predictions = rows.map(point => Number.isFinite(slope) ? slope * point.x + intercept : NaN);
+    const sse = rows.reduce((sum, point, index) => sum + ((point.y - predictions[index]) ** 2), 0);
+    const sst = rows.reduce((sum, point) => sum + ((point.y - meanY) ** 2), 0);
+    const r2 = sst <= Number.EPSILON ? (sse <= Number.EPSILON ? 1 : 0) : 1 - (sse / sst);
+    return { n: rows.length, slope, intercept, r2, predictions };
+  }
+
+  function coomassieSampleResult({
+    absorbances = [],
+    blankAbsorbance = 0,
+    slope,
+    intercept = 0,
+    dilution = 1,
+    extractionVolume,
+    sampleMass,
+  } = {}) {
+    const summary = replicateSummary(absorbances);
+    const adjustedAbsorbance = summary.mean - Number(blankAbsorbance || 0);
+    const numericSlope = Number(slope);
+    const measuredConcentration = Number.isFinite(adjustedAbsorbance) && Number.isFinite(numericSlope) && numericSlope !== 0
+      ? (adjustedAbsorbance - Number(intercept || 0)) / numericSlope
+      : NaN;
+    const originalConcentration = measuredConcentration * Math.max(0, Number(dilution) || 0);
+    const volume = Number(extractionVolume);
+    const mass = Number(sampleMass);
+    const proteinContent = Number.isFinite(originalConcentration) && Number.isFinite(volume) && Number.isFinite(mass) && mass > 0
+      ? originalConcentration * volume / mass
+      : NaN;
+    return {
+      ...summary,
+      adjustedAbsorbance,
+      measuredConcentration,
+      originalConcentration,
+      proteinContent,
+    };
+  }
+
   function roiConsistency(rois, tolerance = 0.1) {
     const dimensions = (rois || []).map(roi => ({
       width: Number(roi.width),
@@ -429,13 +510,16 @@
   return {
     canvasUnitsPerPoint,
     classifySaturation,
+    coomassieSampleResult,
     dpiToPixelsPerMeter,
     editLaneAnnotations,
     filterBandGeometryOutliers,
     figureFramePlacement,
+    linearRegression,
     pixelsForPhysicalWidth,
     readPngDpi,
     refineSignalBounds,
+    replicateSummary,
     roiConsistency,
     separateNeighborRois,
     setPngDpi,
