@@ -4990,6 +4990,7 @@
       $('#qpcrModule').classList.toggle('active-module', button.dataset.module === 'qpcr');
       $('#wbModule').classList.toggle('active-module', button.dataset.module === 'wb');
       $('#coomassieModule').classList.toggle('active-module', button.dataset.module === 'coomassie');
+      $('#experimentModule').classList.toggle('active-module', button.dataset.module === 'experiment');
       if (button.dataset.module === 'coomassie') renderCoomassie();
     }));
     $$('.wb-mode-tab').forEach(button => button.addEventListener('click', () => {

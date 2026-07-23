@@ -1,7 +1,7 @@
 {
-  "name": "BioAssay Studio - qPCR、WB 与蛋白浓度定量",
+  "name": "BioAssay Studio - 科研数据与实验知识库",
   "short_name": "BioAssay Studio",
-  "description": "在浏览器本地完成 qPCR ΔΔCt、Western blot 灰度与考马斯亮蓝蛋白浓度分析。",
+  "description": "在浏览器本地完成 qPCR、Western blot、蛋白定量以及实验配方与实验方法管理。",
   "lang": "zh-CN",
   "start_url": "./",
   "scope": "./",

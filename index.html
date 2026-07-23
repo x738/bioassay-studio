@@ -3,13 +3,14 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="description" content="在浏览器本地完成 qPCR ΔΔCt、Western blot 灰度与考马斯亮蓝蛋白浓度定量。" />
+    <meta name="description" content="在浏览器本地完成 qPCR、Western blot、蛋白定量与实验配方知识库管理。" />
     <meta name="theme-color" content="#142342" />
     <meta name="referrer" content="no-referrer" />
     <link rel="icon" href="icon.svg" type="image/svg+xml" />
     <link rel="manifest" href="manifest.webmanifest" />
-    <title>BioAssay Studio | qPCR、WB 与蛋白浓度定量</title>
-    <link rel="stylesheet" href="styles.css?v=2.6.0-r2" />
+    <title>BioAssay Studio | 科研数据与实验知识库</title>
+    <link rel="stylesheet" href="styles.css?v=2.7.0-r1" />
+    <link rel="stylesheet" href="experiment-library.css?v=2.7.0-r1" />
   </head>
   <body>
     <header class="app-header">
@@ -34,6 +35,7 @@
       <button class="module-tab active" data-module="qpcr">qPCR ΔΔCt 分析</button>
       <button class="module-tab" data-module="wb">WB 灰度分析</button>
       <button class="module-tab" data-module="coomassie">考马斯亮蓝蛋白定量</button>
+      <button class="module-tab" data-module="experiment">实验配方与实验方法</button>
     </nav>
 
     <main>
@@ -447,10 +449,24 @@
           </div>
         </section>
       </section>
+
+      <section id="experimentModule" class="module" aria-labelledby="experimentTitle">
+        <div class="module-intro experiment-intro">
+          <div>
+            <p class="kicker">EXPERIMENT LIBRARY · OFFLINE</p>
+            <h2 id="experimentTitle">实验配方与实验方法</h2>
+            <p>建立可计算、可检索、可版本化的个人实验知识库；配方、母液、计算历史、方法和 OCR 记录全部保存在本地。</p>
+          </div>
+          <div class="experiment-privacy-chip"><b>不依赖网络</b><span>IndexedDB 实时自动保存</span></div>
+        </div>
+        <div id="experimentLibraryMount" class="experiment-library-mount">
+          <div class="el-loading">正在打开本地实验知识库…</div>
+        </div>
+      </section>
     </main>
 
     <footer class="app-footer">
-      <div><strong>BioAssay Studio v2.6.0</strong><span>科研数据在当前浏览器中处理，网站不接收上传内容。</span></div>
+      <div><strong>BioAssay Studio v2.7.0</strong><span>科研数据与实验知识库均在当前浏览器中处理，网站不接收上传内容。</span></div>
       <nav aria-label="网站信息"><a href="privacy.html">隐私与数据处理</a><a href="THIRD_PARTY_NOTICES.txt">第三方许可</a><a href="README.md">使用说明</a></nav>
     </footer>
 
@@ -464,10 +480,12 @@
     </dialog>
 
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
-  <script src="analysis-core.js?v=2.6.0-r2"></script>
+  <script src="analysis-core.js?v=2.7.0-r1"></script>
     <script src="vendor/xlsx.full.min.js"></script>
     <script src="vendor/chart.umd.js"></script>
     <script src="vendor/UTIF.js"></script>
-  <script src="app.js?v=2.6.0-r2"></script>
+  <script src="experiment-core.js?v=2.7.0-r1"></script>
+  <script src="app.js?v=2.7.0-r1"></script>
+  <script src="experiment-library.js?v=2.7.0-r1"></script>
   </body>
 </html>

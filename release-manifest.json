@@ -11,8 +11,23 @@
     },
     {
         "path":  "app.js",
-        "bytes":  310247,
-        "sha256":  "0a7b88a5f3c22364010503f00ba7a618969435cbd3269f6a401492af0984a480"
+        "bytes":  310351,
+        "sha256":  "d5fb769d80ec53a11441211202582b5bd123c9dddb96877aa74f3f6eb7d71a89"
+    },
+    {
+        "path":  "experiment-core.js",
+        "bytes":  17846,
+        "sha256":  "aa7ce9bb18971e21fad4ae79f174d6e83083a19071329b681b002abff1eb7373"
+    },
+    {
+        "path":  "experiment-library.css",
+        "bytes":  29502,
+        "sha256":  "6d71a9551911e794da6bc0d0a40596396697f33023f70ddb7ada40183a8fa606"
+    },
+    {
+        "path":  "experiment-library.js",
+        "bytes":  81194,
+        "sha256":  "41262f8ea85151fab4250ba24284d40193527cdfbe72ee980ed2fbe2438fc68e"
     },
     {
         "path":  "icon.svg",
@@ -21,23 +36,23 @@
     },
     {
         "path":  "index.html",
-        "bytes":  35892,
-        "sha256":  "e2948506cb2f6f100ec966b87fca1b96bc4698d7d4b85b20404fe9329d80769a"
+        "bytes":  36977,
+        "sha256":  "b35ad765e2d937888119b686ea05054c47b04ccd40e357275282acbd4f9de3ca"
     },
     {
         "path":  "manifest.webmanifest",
-        "bytes":  476,
-        "sha256":  "2662546023be95337963b8b8e9204225e60c9c16ae9964b61d71a6f2196a0b80"
+        "bytes":  479,
+        "sha256":  "cb3d940f7262de079a7cb2576966e7d32c0dcdc0c434d6f127750920652ef4ea"
     },
     {
         "path":  "privacy.html",
-        "bytes":  2964,
-        "sha256":  "135f558c62778da576a97da152eb071a2073aeaf9d03a9f4191ca9672d779f2e"
+        "bytes":  3361,
+        "sha256":  "7dfcec716295296d10105099fa1da59de487ba58f6218a0b171c7880701f34f2"
     },
     {
         "path":  "README.md",
-        "bytes":  11111,
-        "sha256":  "e916232e954020cbca4c830fdbf95b35cc4650c09e625840902164a653e2ebf6"
+        "bytes":  13552,
+        "sha256":  "efe00ea21522b499141927c7bcd5f317d98cb9945596b841f5c8782d005c3b96"
     },
     {
         "path":  "robots.txt",
@@ -46,8 +61,8 @@
     },
     {
         "path":  "service-worker.js",
-        "bytes":  1689,
-        "sha256":  "e167bcd7616f986c63672dd2a093f7b82882221df14960e7d8294bdc3d2a43ad"
+        "bytes":  1807,
+        "sha256":  "d89971b17fe5016f6066ddee72977eca432ef4d068eb348a8951a7e0aa33a907"
     },
     {
         "path":  "styles.css",
