@@ -34,8 +34,8 @@
         targetPh: '7.5',
         storage: '4℃',
         components: [
-          { id: uid('component'), name: 'HEPES', targetValue: 50, targetUnit: 'mM', sourceType: 'auto', stockId: '', molecularWeight: 238.30 },
-          { id: uid('component'), name: 'NaCl', targetValue: 150, targetUnit: 'mM', sourceType: 'auto', stockId: '', molecularWeight: 58.44 },
+          { id: uid('component'), name: 'HEPES', targetValue: 50, targetUnit: 'mM', sourceType: 'auto', stockId: '', molecularWeight: 238.30, molecularWeightSource: 'library' },
+          { id: uid('component'), name: 'NaCl', targetValue: 150, targetUnit: 'mM', sourceType: 'auto', stockId: '', molecularWeight: 58.44, molecularWeightSource: 'library' },
         ],
       },
       molarity: { chemicalName: 'HEPES', concentration: 50, concentrationUnit: 'mM', volume: 50, volumeUnit: 'mL', molecularWeight: 238.30 },
@@ -44,6 +44,11 @@
       percentage: { value: 10, kind: 'w/v', finalVolume: 50, finalVolumeUnit: 'mL', sourceUnit: 'mg/mL', targetUnit: 'µg/mL' },
     },
     calculatorResult: null,
+    ocr: {
+      running: false,
+      progress: 0,
+      message: '',
+    },
     searchQuery: '',
     searchResults: [],
     objectUrls: new Set(),
@@ -170,17 +175,23 @@
   }
 
   async function seedChemicals() {
-    if (state.records.chemicals.length) return;
     const timestamp = now();
+    const existing = [...state.records.chemicals];
     for (const item of Core.CHEMICALS) {
-      await dbPut('chemicals', {
+      if (Core.findChemical(item.name, existing)) continue;
+      const record = {
         ...clone(item),
         id: uid('chemical'),
         category: '常用生化试剂',
-        notes: '内置基础数据；不同水合物或盐型的分子量不同，正式配制前请核对试剂瓶标签。',
+        notes: item.notes || '内置基础数据；不同水合物或盐型的分子量不同，正式配制前请核对试剂瓶标签。',
+        builtin: true,
         createdAt: timestamp,
         updatedAt: timestamp,
+      };
+      await dbPut('chemicals', {
+        ...record,
       });
+      existing.push(record);
     }
     state.records.chemicals = await dbGetAll('chemicals');
   }
@@ -271,6 +282,7 @@
   }
 
   function renderShell() {
+    const shellMode = state.selection ? 'record-mode' : 'workspace-mode';
     mount.innerHTML = `
       <div class="el-toolbar">
         <div>
@@ -286,7 +298,7 @@
           <button type="button" data-el-action="cycle-theme">主题：跟随系统</button>
         </div>
       </div>
-      <div class="el-shell">
+      <div class="el-shell ${shellMode} el-page-${escapeAttr(state.page)}">
         <aside class="el-sidebar">
           <nav class="el-subnav" aria-label="实验知识库">
             ${Object.entries(PAGE_LABELS).map(([key, label]) => `<button type="button" class="${state.page === key ? 'active' : ''}" data-el-page="${key}"><span class="el-nav-dot"></span>${label}</button>`).join('')}
@@ -300,8 +312,10 @@
         <section id="elMain" class="el-main">${renderMain()}</section>
         <aside id="elProperties" class="el-properties">${renderProperties()}</aside>
       </div>
+      <datalist id="elChemicalOptions">${chemicalOptionsMarkup()}</datalist>
       ${renderPrintDialog()}`;
     setTheme(localStorage.getItem('bioassay-experiment-theme') || 'system');
+    queueMicrotask(() => { hydrateSelectedProtocolImages().catch(console.error); });
   }
 
   function renderMain() {
@@ -415,7 +429,7 @@
 
   function renderProtocolLibrary() {
     return `
-      <div class="el-page-heading compact"><div><p>PROTOCOL LIBRARY</p><h3>实验方法</h3><span>以 Markdown 记录材料、步骤、注意事项、问题与文献。</span></div><button type="button" class="el-primary-action" data-el-new="protocols">＋ 新建方法</button></div>
+      <div class="el-page-heading compact"><div><p>PROTOCOL LIBRARY</p><h3>实验方法</h3><span>以 Markdown 记录材料、步骤、注意事项、问题、文献与实验截图。</span></div><div class="el-heading-actions"><label class="el-primary-action el-file-button light">截图新建方法<input id="elProtocolImageImport" type="file" accept="image/*" multiple /></label><button type="button" class="el-primary-action" data-el-new="protocols">＋ 新建方法</button></div></div>
       <section class="el-card"><div class="el-record-grid">${state.records.protocols.length ? state.records.protocols.map(item => `
         <button type="button" class="el-protocol-tile" data-el-open="protocols" data-el-id="${item.id}">
           <span>${item.favorite ? '★ 收藏' : escapeHtml(item.category || '实验方法')}</span><h4>${escapeHtml(item.name || '未命名')}</h4>
@@ -442,6 +456,37 @@
     return `<option value="">自动匹配 / 未选择</option>${list.map(stock => `<option value="${stock.id}" ${selected === stock.id ? 'selected' : ''}>${escapeHtml(stock.name)} · ${escapeHtml(String(stock.concentration || ''))} ${escapeHtml(stock.unit || '')}</option>`).join('')}`;
   }
 
+  function chemicalRecords() {
+    const seen = new Set();
+    return [...state.records.chemicals, ...Core.CHEMICALS].filter(item => {
+      const key = Core.normalizeChemicalName(item.name);
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }
+
+  function chemicalOptionsMarkup() {
+    return chemicalRecords()
+      .sort((a, b) => String(a.name).localeCompare(String(b.name), 'en'))
+      .map(item => {
+        const detail = Number(item.molecularWeight) > 0
+          ? `MW ${Core.formatNumber(item.molecularWeight)} · ${item.formula || ''}`
+          : item.notes || '无固定分子量';
+        return `<option value="${escapeAttr(item.name)}">${escapeHtml(detail)}</option>`;
+      })
+      .join('');
+  }
+
+  function chemicalMatchHint(name) {
+    const chemical = findChemicalRecord(name);
+    if (!chemical) return '<small class="el-chemical-hint">输入试剂名后从候选中选择</small>';
+    if (Number(chemical.molecularWeight) > 0) {
+      return `<small class="el-chemical-hint matched">${escapeHtml(chemical.formula || chemical.name)} · MW ${escapeHtml(Core.formatNumber(chemical.molecularWeight))}</small>`;
+    }
+    return `<small class="el-chemical-hint warning">${escapeHtml(chemical.notes || '该试剂无固定分子量，请按百分浓度或母液计算。')}</small>`;
+  }
+
   function renderRecipeEditor(recipe) {
     return `
       <div class="el-editor-head">
@@ -461,7 +506,7 @@
             <thead><tr><th>成分</th><th>最终浓度</th><th>来源</th><th>母液</th><th>分子量</th><th>实际加入量</th><th>计算依据</th><th></th></tr></thead>
             <tbody>${(recipe.components || []).map((component, index) => `
               <tr>
-                <td><input data-el-component="${index}" data-el-component-field="name" value="${escapeAttr(component.name || '')}" placeholder="HEPES" /></td>
+                <td><div class="el-chemical-field"><input data-el-component="${index}" data-el-component-field="name" list="elChemicalOptions" autocomplete="off" value="${escapeAttr(component.name || '')}" placeholder="输入或选择试剂" />${chemicalMatchHint(component.name)}</div></td>
                 <td><div class="el-concentration-field"><input data-el-component="${index}" data-el-component-field="targetValue" type="number" min="0" step="any" value="${escapeAttr(component.targetValue || '')}" /><select data-el-component="${index}" data-el-component-field="targetUnit">${componentOptions(component.targetUnit)}</select></div></td>
                 <td><select data-el-component="${index}" data-el-component-field="sourceType">${sourceOptions(component.sourceType || 'auto')}</select></td>
                 <td><select data-el-component="${index}" data-el-component-field="stockId">${stockOptions(component.stockId, component.name)}</select></td>
@@ -486,6 +531,9 @@
   }
 
   function renderProtocolEditor(protocol) {
+    const ownerKey = `protocols:${protocol.id}`;
+    const attachments = state.records.attachments.filter(item => item.ownerKey === ownerKey);
+    const images = attachments.filter(item => String(item.mime || '').startsWith('image/'));
     return `
       <div class="el-editor-head">
         <div><span>实验方法 · Markdown · v${protocol.version || 1}</span><input class="el-title-input" data-el-field="name" value="${escapeAttr(protocol.name || '')}" placeholder="实验名称" /></div>
@@ -496,6 +544,12 @@
         <label>实验材料<textarea data-el-field="materials" rows="3" placeholder="试剂、样本、耗材和仪器">${escapeHtml(protocol.materials || '')}</textarea></label>
       </div>
       ${protocol.preview ? `<article class="el-markdown-preview">${renderMarkdown(protocol.markdown || '')}</article>` : `<label class="el-markdown-editor">实验步骤（Markdown）<textarea data-el-field="markdown" rows="18" placeholder="# 实验步骤&#10;&#10;1. 准备样品&#10;2. ...">${escapeHtml(protocol.markdown || '')}</textarea></label>`}
+      <section class="el-editor-section el-protocol-media">
+        <div class="el-section-title"><div><h4>实验截图与原始资料</h4><p>截图会作为当前实验方法的本地附件保存，刷新或重启后仍可查看。</p></div><label class="el-file-button">＋ 添加截图<input id="elProtocolImageInput" type="file" accept="image/*" multiple /></label></div>
+        <div id="elProtocolImageGallery" class="el-protocol-image-grid" data-owner-key="${escapeAttr(ownerKey)}">
+          ${images.length ? images.map(item => `<button type="button" data-el-action="download-attachment" data-el-id="${item.id}"><span class="el-image-loading">正在载入预览…</span><b>${escapeHtml(item.name)}</b></button>`).join('') : '<div class="el-empty-state compact"><b>暂无截图</b><span>可直接上传手机拍照、屏幕截图或 OCR 来源图。</span></div>'}
+        </div>
+      </section>
       <div class="el-protocol-meta bottom">
         <label>注意事项<textarea data-el-field="cautions" rows="5">${escapeHtml(protocol.cautions || '')}</textarea></label>
         <label>常见问题<textarea data-el-field="troubleshooting" rows="5">${escapeHtml(protocol.troubleshooting || '')}</textarea></label>
@@ -675,7 +729,7 @@
         <div><b>v${record.version || 1}</b><small>${escapeHtml(dateText(record.updatedAt))}</small></div>
       </header>
       ${content}
-      <footer class="el-print-footer"><span>BioAssay Studio v${escapeHtml(document.documentElement.dataset.appVersion || '2.8.1')}</span><span>${index + 1} / ${total} · 打印预览生成于 ${escapeHtml(dateText(now()))}</span></footer>
+      <footer class="el-print-footer"><span>BioAssay Studio v${escapeHtml(document.documentElement.dataset.appVersion || '2.8.2')}</span><span>${index + 1} / ${total} · 打印预览生成于 ${escapeHtml(dateText(now()))}</span></footer>
     </article>`;
   }
 
@@ -766,13 +820,16 @@
 
   function renderOcrLanding() {
     return `
-      <div class="el-page-heading compact"><div><p>OCR IMPORT</p><h3>导入图片、截图与扫描文件</h3><span>识别结果必须人工确认后再保存；原图和确认文字均保存在本地。</span></div></div>
+      <div class="el-page-heading compact"><div><p>OFFLINE OCR & IMAGE ARCHIVE</p><h3>离线文字识别与截图归档</h3><span>中英文 OCR 在本机运行；识别结果必须人工核对，原图与文字不会上传。</span></div></div>
       <section class="el-ocr-drop">
-        <div><span>OCR</span><h4>选择图片、PDF 或文本文件</h4><p>支持图片、手机拍照、截图和 PDF。浏览器具备本地 TextDetector 时可直接识别；否则仍可导入原图并粘贴/校对文字。</p></div>
-        <label class="el-primary-action">选择文件<input id="elOcrInput" type="file" accept="image/*,.pdf,application/pdf,.txt,text/plain" multiple /></label>
+        <div><span>OCR</span><h4>识别图片，或把截图直接建立为实验方法</h4><p>图片可使用内置 Tesseract.js 中英文模型离线识别；PDF 请先导出页面截图。若只需归档，不必等待 OCR，可直接建立带原图附件的实验方法。</p></div>
+        <div class="el-ocr-import-actions">
+          <label class="el-primary-action">导入到识别区<input id="elOcrInput" type="file" accept="image/*,.txt,text/plain" multiple /></label>
+          <label class="el-secondary-action">截图直接建方法<input id="elProtocolImageImport" type="file" accept="image/*" multiple /></label>
+        </div>
       </section>
       <div class="el-ocr-record-grid">${state.records.ocrRecords.length ? state.records.ocrRecords.map(item => `<button type="button" data-el-open="ocrRecords" data-el-id="${item.id}"><span>${escapeHtml(item.fileType || '文件')}</span><b>${escapeHtml(item.title || item.name || '未命名 OCR')}</b><small>${escapeHtml(dateText(item.updatedAt))}</small></button>`).join('') : '<div class="el-empty-state"><b>暂无 OCR 记录</b><span>导入文件后会创建一条可编辑记录。</span></div>'}</div>
-      <div class="el-ocr-boundary"><b>当前离线识别边界</b><p>本版本不连接任何云端 OCR。若当前浏览器不提供 TextDetector，本模块会保留原文件、手动录入/粘贴、单位提示和一键入库功能；不会伪造识别结果。</p></div>`;
+      <div class="el-ocr-boundary"><b>识别原则</b><p>OCR 结果只作为录入草稿，浓度、单位、试剂名和步骤必须人工核对。复杂表格、手写字或模糊照片可能识别不完整；原始截图始终保留，可直接进入实验方法附件。</p></div>`;
   }
 
   function objectUrl(blob) {
@@ -788,17 +845,19 @@
         ? `<object data="${objectUrl(record.blob)}" type="application/pdf"><p>浏览器无法内嵌预览此 PDF。</p></object>`
         : '<div class="el-file-placeholder">文件已保存在本地</div>';
     const tokens = detectScientificTokens(record.text || '');
+    const progress = Math.max(0, Math.min(100, Number(state.ocr.progress) || 0));
     return `
       <div class="el-editor-head">
         <div><span>OCR RECORD</span><input class="el-title-input" data-el-field="title" value="${escapeAttr(record.title || '')}" placeholder="识别记录标题" /></div>
-        <div><button type="button" data-el-action="run-local-ocr">开始离线 OCR</button><button type="button" class="primary" data-el-action="ocr-to-protocol">保存为实验方法</button></div>
+        <div><button type="button" data-el-action="run-local-ocr" ${state.ocr.running ? 'disabled' : ''}>${state.ocr.running ? '正在识别…' : '开始离线 OCR'}</button><button type="button" class="primary" data-el-action="ocr-to-protocol">保存原图与文字为实验方法</button></div>
       </div>
+      <div class="el-ocr-progress ${state.ocr.running ? 'active' : ''}" aria-live="polite"><div><span id="elOcrProgressBar" style="width:${progress}%"></span></div><p id="elOcrProgressText">${escapeHtml(state.ocr.message || (record.ocrEngine ? `${record.ocrEngine} · 置信度 ${Core.formatNumber(record.ocrConfidence || 0)}%` : '识别引擎将在点击后从本地加载'))}</p></div>
       <div class="el-ocr-editor">
         <section class="el-ocr-preview"><div class="el-card-title"><div><h4>原始文件</h4><p>${escapeHtml(record.name || '')}</p></div></div>${preview}</section>
         <section class="el-ocr-text">
           <label>可编辑识别文字<textarea data-el-field="text" rows="24" placeholder="OCR 结果、从 Word 复制的文字或手动录入内容">${escapeHtml(record.text || '')}</textarea></label>
           <div class="el-token-list"><b>检测到的实验信息</b>${tokens.length ? tokens.map(token => `<span>${escapeHtml(token)}</span>`).join('') : '<small>尚未识别到浓度或单位</small>'}</div>
-          <div class="el-ocr-actions"><button type="button" data-el-action="ocr-to-recipe">保存为配方草稿</button><button type="button" data-el-action="ocr-to-protocol">保存为 Protocol</button></div>
+          <div class="el-ocr-actions"><button type="button" data-el-action="ocr-to-recipe">保存为配方草稿</button><button type="button" data-el-action="ocr-to-protocol">保存原图与文字为 Protocol</button></div>
         </section>
       </div>`;
   }
@@ -838,7 +897,9 @@
         return `<option value="${escapeAttr(pair[0])}" ${String(value) === String(pair[0]) ? 'selected' : ''}>${escapeHtml(pair[1])}</option>`;
       }).join('')}</select></label>`;
     }
-    return `<label>${label}<input data-el-calc-field="${name}" ${options.type === 'text' ? '' : 'type="number" step="any"'} value="${escapeAttr(value)}" placeholder="${escapeAttr(options.placeholder || '')}" /></label>`;
+    const list = options.list ? ` list="${escapeAttr(options.list)}" autocomplete="off"` : '';
+    const hint = options.chemicalHint ? chemicalMatchHint(value) : '';
+    return `<label>${label}<input data-el-calc-field="${name}"${list} ${options.type === 'text' ? '' : 'type="number" step="any"'} value="${escapeAttr(value)}" placeholder="${escapeAttr(options.placeholder || '')}" />${hint}</label>`;
   }
 
   function renderCalculatorForm() {
@@ -846,7 +907,7 @@
     if (tab === 'molarity') {
       return `<div class="el-card-title"><div><h4>摩尔浓度配置</h4><p>m = C × V × MW</p></div></div>
         <div class="el-form-grid">
-          ${calcInput('chemicalName', '试剂名称', { type: 'text', placeholder: '输入 HEPES 可自动读取 MW' })}
+          ${calcInput('chemicalName', '试剂名称', { type: 'text', placeholder: '输入或选择 HEPES、NaCl…', list: 'elChemicalOptions', chemicalHint: true })}
           ${calcInput('molecularWeight', '分子量（g/mol）')}
           ${calcInput('concentration', '目标浓度')}
           ${calcInput('concentrationUnit', '浓度单位', { select: ['M', 'mM', 'µM'] })}
@@ -892,13 +953,14 @@
         ${calcInput('targetPh', '目标 pH', { type: 'text' })}
         ${calcInput('storage', '保存条件', { type: 'text' })}
       </div>
-      <div class="el-table-wrap"><table class="el-buffer-table"><thead><tr><th>成分</th><th>目标浓度</th><th>来源</th><th>母液</th><th>MW</th><th></th></tr></thead><tbody>
+      <div class="el-chemical-library-note"><b>内置 ${chemicalRecords().length} 种常用生化试剂</b><span>输入中文名、英文名或化学式并从候选中选择，将自动填入分子量。水合物会单独列出，请以试剂瓶标签为准。</span></div>
+      <div class="el-table-wrap"><table class="el-buffer-table"><thead><tr><th>成分</th><th>目标浓度</th><th>来源</th><th>母液</th><th>MW (g/mol)</th><th></th></tr></thead><tbody>
         ${draft.components.map((component, index) => `<tr>
-          <td><input data-el-calc-component="${index}" data-el-calc-component-field="name" value="${escapeAttr(component.name || '')}" /></td>
+          <td><div class="el-chemical-field"><input data-el-calc-component="${index}" data-el-calc-component-field="name" list="elChemicalOptions" autocomplete="off" value="${escapeAttr(component.name || '')}" placeholder="输入或选择试剂" />${chemicalMatchHint(component.name)}</div></td>
           <td><div class="el-concentration-field"><input data-el-calc-component="${index}" data-el-calc-component-field="targetValue" type="number" step="any" value="${escapeAttr(component.targetValue || '')}" /><select data-el-calc-component="${index}" data-el-calc-component-field="targetUnit">${componentOptions(component.targetUnit)}</select></div></td>
           <td><select data-el-calc-component="${index}" data-el-calc-component-field="sourceType">${sourceOptions(component.sourceType || 'auto')}</select></td>
           <td><select data-el-calc-component="${index}" data-el-calc-component-field="stockId">${stockOptions(component.stockId, component.name)}</select></td>
-          <td><input data-el-calc-component="${index}" data-el-calc-component-field="molecularWeight" type="number" min="0" step="any" value="${escapeAttr(component.molecularWeight || '')}" /></td>
+          <td><input data-el-calc-component="${index}" data-el-calc-component-field="molecularWeight" type="number" min="0" step="any" value="${escapeAttr(component.molecularWeight || '')}" placeholder="自动填入" /></td>
           <td><button type="button" class="el-row-delete" data-el-action="delete-calc-component" data-el-index="${index}">×</button></td>
         </tr>`).join('')}
       </tbody></table></div>
@@ -951,6 +1013,7 @@
     if (properties) properties.innerHTML = renderProperties();
     if (tree) tree.innerHTML = renderTree();
     setAutosaveState(state.autosaveState);
+    queueMicrotask(() => { hydrateSelectedProtocolImages().catch(console.error); });
   }
 
   function createBaseRecord(store) {
@@ -975,7 +1038,7 @@
         targetVolumeUnit: 'mL',
         targetPh: '',
         storage: '4℃',
-        components: [{ id: uid('component'), name: '', targetValue: '', targetUnit: 'mM', sourceType: 'auto', stockId: '', molecularWeight: '' }],
+        components: [{ id: uid('component'), name: '', targetValue: '', targetUnit: 'mM', sourceType: 'auto', stockId: '', molecularWeight: '', molecularWeightSource: '' }],
         steps: [],
       };
     }
@@ -1060,9 +1123,13 @@
     if (!component) return;
     const numericFields = new Set(['targetValue', 'molecularWeight']);
     component[field] = numericFields.has(field) ? (rawValue === '' ? '' : Number(rawValue)) : rawValue;
+    if (field === 'molecularWeight') component.molecularWeightSource = 'manual';
     if (field === 'name') {
       const chemical = findChemicalRecord(rawValue);
-      if (chemical && !(Number(component.molecularWeight) > 0)) component.molecularWeight = chemical.molecularWeight;
+      if (chemical) {
+        component.molecularWeight = Number(chemical.molecularWeight) > 0 ? chemical.molecularWeight : '';
+        component.molecularWeightSource = 'library';
+      }
     }
     scheduleSave(recipe);
   }
@@ -1363,6 +1430,44 @@
     }
   }
 
+  function updateOcrProgress(progress, message) {
+    state.ocr.progress = Math.max(0, Math.min(100, Math.round(Number(progress) || 0)));
+    state.ocr.message = message || '';
+    const bar = document.getElementById('elOcrProgressBar');
+    const text = document.getElementById('elOcrProgressText');
+    if (bar) bar.style.width = `${state.ocr.progress}%`;
+    if (text) text.textContent = state.ocr.message;
+  }
+
+  function loadScriptOnce(src, globalName) {
+    if (globalName && window[globalName]) return Promise.resolve(window[globalName]);
+    return new Promise((resolve, reject) => {
+      const existing = [...document.scripts].find(script => script.src === src);
+      if (existing) {
+        existing.addEventListener('load', () => resolve(globalName ? window[globalName] : true), { once: true });
+        existing.addEventListener('error', () => reject(new Error('本地 OCR 脚本加载失败')), { once: true });
+        return;
+      }
+      const script = document.createElement('script');
+      script.src = src;
+      script.async = true;
+      script.onload = () => resolve(globalName ? window[globalName] : true);
+      script.onerror = () => reject(new Error('本地 OCR 脚本加载失败'));
+      document.head.appendChild(script);
+    });
+  }
+
+  function ocrStatusText(status) {
+    const labels = {
+      'loading tesseract core': '正在载入离线识别核心',
+      'initializing tesseract': '正在初始化识别引擎',
+      'loading language traineddata': '正在载入中英文模型',
+      'initializing api': '正在初始化语言模型',
+      'recognizing text': '正在识别图片文字',
+    };
+    return labels[status] || status || '正在处理';
+  }
+
   async function runLocalOcr() {
     const record = selectedRecord();
     if (!record?.blob || state.selection.store !== 'ocrRecords') return;
@@ -1370,26 +1475,51 @@
       notice('当前离线 OCR 仅可尝试识别图片；PDF 请先导出页面截图。', 'bad');
       return;
     }
-    if (!('TextDetector' in window)) {
-      notice('当前浏览器未提供离线 TextDetector。可保留原图并粘贴或手动校对文字。', 'bad');
-      return;
-    }
+    if (state.ocr.running) return;
+    let worker = null;
     try {
-      notice('正在使用浏览器本地 OCR，不会上传图片。');
-      const bitmap = await createImageBitmap(record.blob);
-      const detector = new window.TextDetector();
-      const blocks = await detector.detect(bitmap);
-      bitmap.close?.();
-      const text = blocks.map(block => block.rawValue || '').filter(Boolean).join('\n');
+      state.ocr.running = true;
+      updateOcrProgress(1, '正在载入离线 OCR 组件…');
+      refreshMain();
+      notice('正在本机识别图片，首次启动需载入离线中英文模型。');
+      const tesseractUrl = new URL('vendor/tesseract/tesseract.min.js', document.baseURI).href;
+      await loadScriptOnce(tesseractUrl, 'Tesseract');
+      const logger = message => {
+        const progress = Math.max(state.ocr.progress, Math.round((Number(message.progress) || 0) * 100));
+        updateOcrProgress(progress, `${ocrStatusText(message.status)}${message.progress ? ` · ${progress}%` : ''}`);
+      };
+      worker = await window.Tesseract.createWorker('chi_sim+eng', window.Tesseract.OEM.LSTM_ONLY, {
+        workerPath: new URL('vendor/tesseract/worker.min.js', document.baseURI).href,
+        corePath: new URL('vendor/tesseract/core/tesseract-core-lstm.wasm.js', document.baseURI).href,
+        langPath: new URL('vendor/tesseract/lang/', document.baseURI).href,
+        gzip: true,
+        logger,
+        errorHandler: error => console.error('Tesseract worker error', error),
+      });
+      const result = await worker.recognize(record.blob);
+      const text = String(result?.data?.text || '').trim();
       if (!text.trim()) throw new Error('未识别到文字');
       record.text = text;
       record.status = '待人工确认';
+      record.ocrEngine = 'Tesseract.js 6.0.1 · chi_sim+eng';
+      record.ocrConfidence = Number(result?.data?.confidence) || 0;
       record.updatedAt = now();
       await dbPut('ocrRecords', record);
-      refreshMain();
+      updateOcrProgress(100, `识别完成 · 平均置信度 ${Core.formatNumber(record.ocrConfidence)}% · 请人工核对`);
       notice('离线 OCR 完成，请人工核对标题、数值和单位。', 'good');
     } catch (error) {
+      updateOcrProgress(state.ocr.progress, `识别失败：${error.message}`);
       notice(`离线 OCR 失败：${error.message}`, 'bad');
+    } finally {
+      if (worker) {
+        try {
+          await worker.terminate();
+        } catch {
+          // Worker cleanup must not replace the OCR result or the original error.
+        }
+      }
+      state.ocr.running = false;
+      refreshMain();
     }
   }
 
@@ -1433,7 +1563,7 @@
   async function ocrToProtocol() {
     const record = selectedRecord();
     if (!record || state.selection.store !== 'ocrRecords') return;
-    await createRecord('protocols', {
+    const protocol = await createRecord('protocols', {
       name: record.title || 'OCR 导入实验方法',
       category: 'OCR 导入',
       purpose: '由 OCR 记录生成，需人工核对',
@@ -1441,31 +1571,81 @@
       notes: `来源文件：${record.name || '未知'}`,
       ocrRecordId: record.id,
     });
-    notice('已生成实验方法草稿，请人工核对后继续编辑。', 'good');
+    if (record.blob) await storeAttachment('protocols', protocol.id, record.blob, record.name);
+    renderShell();
+    hydrateSelectedProtocolImages();
+    notice('已生成实验方法草稿，并把 OCR 原图作为附件一同保存。', 'good');
+  }
+
+  async function storeAttachment(ownerType, ownerId, blob, fallbackName = '') {
+    const attachment = {
+      id: uid('attachment'),
+      ownerKey: `${ownerType}:${ownerId}`,
+      ownerType,
+      ownerId,
+      name: blob?.name || fallbackName || 'attachment',
+      mime: blob?.type || 'application/octet-stream',
+      size: Number(blob?.size) || 0,
+      blob,
+      createdAt: now(),
+      updatedAt: now(),
+    };
+    await dbPut('attachments', attachment);
+    const { blob: storedBlob, ...metadata } = attachment;
+    state.records.attachments.unshift(metadata);
+    return metadata;
   }
 
   async function addAttachments(files) {
     if (!state.selection || !files?.length) return;
-    const ownerKey = `${state.selection.store}:${state.selection.id}`;
-    for (const file of files) {
-      const attachment = {
-        id: uid('attachment'),
-        ownerKey,
-        ownerType: state.selection.store,
-        ownerId: state.selection.id,
-        name: file.name,
-        mime: file.type || 'application/octet-stream',
-        size: file.size,
-        blob: file,
-        createdAt: now(),
-        updatedAt: now(),
-      };
-      await dbPut('attachments', attachment);
-      const { blob, ...metadata } = attachment;
-      state.records.attachments.unshift(metadata);
-    }
+    for (const file of files) await storeAttachment(state.selection.store, state.selection.id, file);
     refreshMain();
+    hydrateSelectedProtocolImages();
     notice(`已保存 ${files.length} 个附件到本地知识库。`, 'good');
+  }
+
+  async function importImagesAsProtocols(files) {
+    const accepted = [...(files || [])].filter(file => String(file.type || '').startsWith('image/'));
+    if (!accepted.length) {
+      notice('请选择图片或截图文件。', 'bad');
+      return;
+    }
+    let lastProtocol = null;
+    for (const file of accepted) {
+      const protocol = {
+        ...createBaseRecord('protocols'),
+        name: file.name.replace(/\.[^.]+$/, '') || '实验截图',
+        category: '截图归档',
+        purpose: '由实验截图直接建立，可继续补充目的、材料和步骤',
+        markdown: '# 实验记录\n\n请根据原始截图补充实验步骤与说明。',
+        notes: `原始截图：${file.name}`,
+      };
+      await dbPut('protocols', protocol);
+      state.records.protocols.unshift(protocol);
+      await storeAttachment('protocols', protocol.id, file);
+      lastProtocol = protocol;
+    }
+    state.page = 'protocols';
+    state.selection = { store: 'protocols', id: lastProtocol.id };
+    renderShell();
+    hydrateSelectedProtocolImages();
+    notice(`已把 ${accepted.length} 张截图建立为实验方法，原图已作为附件保存。`, 'good');
+  }
+
+  async function hydrateSelectedProtocolImages() {
+    if (state.selection?.store !== 'protocols') return;
+    const gallery = document.getElementById('elProtocolImageGallery');
+    if (!gallery) return;
+    const ownerKey = `protocols:${state.selection.id}`;
+    const images = state.records.attachments.filter(item => item.ownerKey === ownerKey && String(item.mime || '').startsWith('image/'));
+    if (!images.length) return;
+    const cards = await Promise.all(images.map(async item => {
+      const stored = await dbGet('attachments', item.id);
+      if (!stored?.blob) return '';
+      const url = objectUrl(stored.blob);
+      return `<button type="button" data-el-action="download-attachment" data-el-id="${item.id}"><img src="${escapeAttr(url)}" alt="${escapeAttr(item.name)}" /><b>${escapeHtml(item.name)}</b><small>${fileSizeText(item.size)}</small></button>`;
+    }));
+    if (document.getElementById('elProtocolImageGallery') === gallery) gallery.innerHTML = cards.filter(Boolean).join('');
   }
 
   async function exportLibrary() {
@@ -1654,7 +1834,7 @@
         notice('配方表格已复制，可粘贴到 Excel 或 Word。', 'good');
       } else if (action === 'add-component') {
         const recipe = selectedRecord();
-        recipe.components.push({ id: uid('component'), name: '', targetValue: '', targetUnit: 'mM', sourceType: 'auto', stockId: '', molecularWeight: '' });
+        recipe.components.push({ id: uid('component'), name: '', targetValue: '', targetUnit: 'mM', sourceType: 'auto', stockId: '', molecularWeight: '', molecularWeightSource: '' });
         scheduleSave(recipe);
         refreshMain();
       } else if (action === 'delete-component') {
@@ -1691,7 +1871,7 @@
       else if (action === 'calculate') await calculateCurrent();
       else if (action === 'save-result-recipe') await saveCalculatorResultAsRecipe();
       else if (action === 'add-calc-component') {
-        state.calculatorDraft.buffer.components.push({ id: uid('component'), name: '', targetValue: '', targetUnit: 'mM', sourceType: 'auto', stockId: '', molecularWeight: '' });
+        state.calculatorDraft.buffer.components.push({ id: uid('component'), name: '', targetValue: '', targetUnit: 'mM', sourceType: 'auto', stockId: '', molecularWeight: '', molecularWeightSource: '' });
         refreshMain();
       } else if (action === 'delete-calc-component') {
         state.calculatorDraft.buffer.components.splice(Number(actionButton.dataset.index), 1);
@@ -1708,6 +1888,7 @@
             sourceType: 'auto',
             stockId: '',
             molecularWeight: Number(row[3]) || findChemicalRecord(row[0])?.molecularWeight || '',
+            molecularWeightSource: Number(row[3]) ? 'manual' : 'library',
           }));
           refreshMain();
         }
@@ -1743,7 +1924,14 @@
         const component = state.calculatorDraft.buffer.components[Number(event.target.dataset.elCalcComponent)];
         const field = event.target.dataset.elCalcComponentField;
         component[field] = ['targetValue', 'molecularWeight'].includes(field) ? (event.target.value === '' ? '' : Number(event.target.value)) : event.target.value;
-        if (field === 'name' && !(Number(component.molecularWeight) > 0)) component.molecularWeight = findChemicalRecord(event.target.value)?.molecularWeight || '';
+        if (field === 'molecularWeight') component.molecularWeightSource = 'manual';
+        if (field === 'name') {
+          const chemical = findChemicalRecord(event.target.value);
+          if (chemical) {
+            component.molecularWeight = Number(chemical.molecularWeight) > 0 ? chemical.molecularWeight : '';
+            component.molecularWeightSource = 'library';
+          }
+        }
       } else if (event.target.id === 'elSearchInput') state.searchQuery = event.target.value;
     });
 
@@ -1760,9 +1948,11 @@
         state.print[option] = event.target.type === 'checkbox' ? event.target.checked : option === 'fontSize' ? Number(event.target.value) : event.target.value;
         renderShell();
       } else if (event.target.id === 'elOcrInput') await importOcrFiles(event.target.files);
+      else if (event.target.id === 'elProtocolImageImport') await importImagesAsProtocols(event.target.files);
+      else if (event.target.id === 'elProtocolImageInput') await addAttachments(event.target.files);
       else if (event.target.id === 'elAttachmentInput') await addAttachments(event.target.files);
       else if (event.target.id === 'elBackupInput' && event.target.files[0]) await importLibrary(event.target.files[0]);
-      else if (event.target.matches('[data-el-calc-field]') && event.target.dataset.elCalcField === 'kind') refreshMain();
+      else if (event.target.matches('[data-el-calc-field]') && ['kind', 'chemicalName'].includes(event.target.dataset.elCalcField)) refreshMain();
       else if (event.target.matches('[data-el-component]') && ['name', 'sourceType', 'stockId'].includes(event.target.dataset.elComponentField)) refreshMain();
       else if (event.target.matches('[data-el-calc-component]') && ['name', 'sourceType', 'stockId'].includes(event.target.dataset.elCalcComponentField)) refreshMain();
     });

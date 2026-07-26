@@ -7,7 +7,7 @@
   const toast = $('#toast');
   const sheetDialog = $('#sheetDialog');
   const core = window.BioAssayCore;
-  const APP_VERSION = document.documentElement.dataset.appVersion || '2.8.1';
+  const APP_VERSION = document.documentElement.dataset.appVersion || '2.8.2';
   const auditLog = [];
   const history = { undo: [], redo: [], applying: false, max: 50 };
   const resourcePromises = new Map();

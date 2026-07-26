@@ -47,26 +47,53 @@
   });
 
   const CHEMICALS = Object.freeze([
-    { name: 'HEPES', formula: 'C8H18N2O4S', molecularWeight: 238.30, aliases: ['hepes free acid'] },
+    { name: 'HEPES', formula: 'C8H18N2O4S', molecularWeight: 238.30, aliases: ['hepes free acid', '羟乙基哌嗪乙硫磺酸'] },
     { name: 'NaCl', formula: 'NaCl', molecularWeight: 58.44, aliases: ['氯化钠', 'sodium chloride'] },
     { name: 'KCl', formula: 'KCl', molecularWeight: 74.55, aliases: ['氯化钾', 'potassium chloride'] },
     { name: 'MgCl2', formula: 'MgCl2', molecularWeight: 95.21, aliases: ['氯化镁', 'magnesium chloride', 'anhydrous magnesium chloride'] },
     { name: 'MgCl2·6H2O', formula: 'MgCl2·6H2O', molecularWeight: 203.30, aliases: ['六水氯化镁', 'magnesium chloride hexahydrate'] },
     { name: 'CaCl2', formula: 'CaCl2', molecularWeight: 110.98, aliases: ['氯化钙', 'calcium chloride'] },
+    { name: 'CaCl2·2H2O', formula: 'CaCl2·2H2O', molecularWeight: 147.02, aliases: ['二水氯化钙', 'calcium chloride dihydrate'] },
     { name: 'Tris', formula: 'C4H11NO3', molecularWeight: 121.14, aliases: ['tris base', '三羟甲基氨基甲烷'] },
     { name: 'Tris-HCl', formula: 'C4H12ClNO3', molecularWeight: 157.60, aliases: ['tris hydrochloride'] },
     { name: 'MES', formula: 'C6H13NO4S', molecularWeight: 195.24, aliases: ['mes free acid'] },
     { name: 'Bis-Tris', formula: 'C8H19NO5', molecularWeight: 209.24, aliases: ['bis tris'] },
+    { name: 'MOPS', formula: 'C7H15NO4S', molecularWeight: 209.26, aliases: ['3-(n-morpholino)propanesulfonic acid', '吗啉丙磺酸'] },
+    { name: 'PIPES', formula: 'C8H18N2O6S2', molecularWeight: 302.37, aliases: ['哌嗪二乙磺酸'] },
     { name: 'EDTA', formula: 'C10H16N2O8', molecularWeight: 292.24, aliases: ['edta free acid', '乙二胺四乙酸'] },
     { name: 'Na2EDTA·2H2O', formula: 'C10H14N2Na2O8·2H2O', molecularWeight: 372.24, aliases: ['edta disodium dihydrate', 'edta二钠二水合物'] },
+    { name: 'EGTA', formula: 'C14H24N2O10', molecularWeight: 380.35, aliases: ['乙二醇双氨乙基醚四乙酸'] },
     { name: 'DTT', formula: 'C4H10O2S2', molecularWeight: 154.25, aliases: ['二硫苏糖醇', 'dithiothreitol'] },
+    { name: 'TCEP·HCl', formula: 'C9H16ClO6P', molecularWeight: 286.65, aliases: ['tcep hydrochloride', '三(2-羧乙基)膦盐酸盐'] },
+    { name: 'β-Mercaptoethanol', formula: 'C2H6OS', molecularWeight: 78.13, aliases: ['beta-mercaptoethanol', '2-mercaptoethanol', 'β-巯基乙醇', '2-巯基乙醇'] },
     { name: 'PMSF', formula: 'C7H7FO2S', molecularWeight: 174.19, aliases: ['苯甲基磺酰氟'] },
     { name: 'SDS', formula: 'C12H25NaO4S', molecularWeight: 288.38, aliases: ['十二烷基硫酸钠'] },
     { name: 'Glycine', formula: 'C2H5NO2', molecularWeight: 75.07, aliases: ['甘氨酸'] },
     { name: 'Urea', formula: 'CH4N2O', molecularWeight: 60.06, aliases: ['尿素'] },
+    { name: 'Thiourea', formula: 'CH4N2S', molecularWeight: 76.12, aliases: ['硫脲'] },
     { name: 'Sucrose', formula: 'C12H22O11', molecularWeight: 342.30, aliases: ['蔗糖'] },
+    { name: 'D-Glucose', formula: 'C6H12O6', molecularWeight: 180.16, aliases: ['glucose', '无水葡萄糖', 'dextrose'] },
     { name: 'Glycerol', formula: 'C3H8O3', molecularWeight: 92.09, aliases: ['甘油'] },
     { name: 'Imidazole', formula: 'C3H4N2', molecularWeight: 68.08, aliases: ['咪唑'] },
+    { name: 'NaH2PO4', formula: 'NaH2PO4', molecularWeight: 119.98, aliases: ['无水磷酸二氢钠', 'sodium phosphate monobasic anhydrous'] },
+    { name: 'NaH2PO4·H2O', formula: 'NaH2PO4·H2O', molecularWeight: 137.99, aliases: ['一水磷酸二氢钠', 'sodium phosphate monobasic monohydrate'] },
+    { name: 'Na2HPO4', formula: 'Na2HPO4', molecularWeight: 141.96, aliases: ['无水磷酸氢二钠', 'sodium phosphate dibasic anhydrous'] },
+    { name: 'Na2HPO4·2H2O', formula: 'Na2HPO4·2H2O', molecularWeight: 177.99, aliases: ['二水磷酸氢二钠', 'sodium phosphate dibasic dihydrate'] },
+    { name: 'KH2PO4', formula: 'KH2PO4', molecularWeight: 136.09, aliases: ['磷酸二氢钾', 'potassium phosphate monobasic'] },
+    { name: 'K2HPO4', formula: 'K2HPO4', molecularWeight: 174.18, aliases: ['磷酸氢二钾', 'potassium phosphate dibasic'] },
+    { name: 'Sodium acetate', formula: 'C2H3NaO2', molecularWeight: 82.03, aliases: ['无水乙酸钠', '醋酸钠', 'sodium acetate anhydrous'] },
+    { name: 'Sodium acetate·3H2O', formula: 'C2H3NaO2·3H2O', molecularWeight: 136.08, aliases: ['三水乙酸钠', 'sodium acetate trihydrate'] },
+    { name: 'Ammonium sulfate', formula: '(NH4)2SO4', molecularWeight: 132.14, aliases: ['硫酸铵'] },
+    { name: 'Ammonium bicarbonate', formula: 'NH4HCO3', molecularWeight: 79.06, aliases: ['碳酸氢铵'] },
+    { name: 'APS', formula: '(NH4)2S2O8', molecularWeight: 228.20, aliases: ['ammonium persulfate', '过硫酸铵'] },
+    { name: 'Boric acid', formula: 'H3BO3', molecularWeight: 61.83, aliases: ['硼酸'] },
+    { name: 'Acrylamide', formula: 'C3H5NO', molecularWeight: 71.08, aliases: ['丙烯酰胺'] },
+    { name: 'Bis-acrylamide', formula: 'C7H10N2O2', molecularWeight: 154.17, aliases: ['n,n-methylenebisacrylamide', '甲叉双丙烯酰胺'] },
+    { name: 'TEMED', formula: 'C6H16N2', molecularWeight: 116.20, aliases: ['四甲基乙二胺'] },
+    { name: 'NaOH', formula: 'NaOH', molecularWeight: 40.00, aliases: ['氢氧化钠', 'sodium hydroxide'] },
+    { name: 'KOH', formula: 'KOH', molecularWeight: 56.11, aliases: ['氢氧化钾', 'potassium hydroxide'] },
+    { name: 'Triton X-100', formula: 'mixture', molecularWeight: null, aliases: ['triton x100'], notes: '混合物，无固定分子量；通常按 % (v/v) 配制。' },
+    { name: 'Tween 20', formula: 'mixture', molecularWeight: null, aliases: ['polysorbate 20', '吐温20'], notes: '混合物，无固定分子量；通常按 % (v/v) 配制。' },
   ]);
 
   function finite(value, fallback = NaN) {
@@ -244,14 +271,48 @@
     };
   }
 
+  function normalizeChemicalName(name) {
+    return String(name || '')
+      .trim()
+      .toLowerCase()
+      .replace(/[‐‑‒–—−]/g, '-')
+      .replace(/[·•]/g, '.')
+      .replace(/[₂]/g, '2')
+      .replace(/[₃]/g, '3')
+      .replace(/[₄]/g, '4')
+      .replace(/\s+/g, '');
+  }
+
   function findChemical(name, chemicals = CHEMICALS) {
-    const query = String(name || '').trim().toLowerCase();
+    const query = normalizeChemicalName(name);
     if (!query) return null;
     return chemicals.find(item => {
-      if (String(item.name).toLowerCase() === query) return true;
-      if (String(item.formula || '').toLowerCase() === query) return true;
-      return (item.aliases || []).some(alias => String(alias).toLowerCase() === query);
+      if (normalizeChemicalName(item.name) === query) return true;
+      if (normalizeChemicalName(item.formula) === query) return true;
+      return (item.aliases || []).some(alias => normalizeChemicalName(alias) === query);
     }) || null;
+  }
+
+  function findChemicalMatches(name, chemicals = CHEMICALS, limit = 8) {
+    const query = normalizeChemicalName(name);
+    const unique = new Set();
+    const matches = [];
+    for (const item of chemicals) {
+      const terms = [item.name, item.formula, ...(item.aliases || [])].map(normalizeChemicalName).filter(Boolean);
+      const score = !query ? 3
+        : terms.some(term => term === query) ? 0
+          : terms.some(term => term.startsWith(query)) ? 1
+            : terms.some(term => term.includes(query)) ? 2
+              : 9;
+      const key = normalizeChemicalName(item.name);
+      if (score >= 9 || unique.has(key)) continue;
+      unique.add(key);
+      matches.push({ item, score });
+    }
+    return matches
+      .sort((a, b) => a.score - b.score || String(a.item.name).localeCompare(String(b.item.name), 'en'))
+      .slice(0, Math.max(1, Number(limit) || 8))
+      .map(entry => entry.item);
   }
 
   function calculateComponent(component, context) {
@@ -426,7 +487,9 @@
     calculateStock,
     solveDilution,
     convertPercentage,
+    normalizeChemicalName,
     findChemical,
+    findChemicalMatches,
     calculateComponent,
     generateProtocol,
     calculateBuffer,

@@ -84,7 +84,10 @@
     const measuredConcentration = Number.isFinite(adjustedAbsorbance) && Number.isFinite(numericSlope) && numericSlope !== 0
       ? (adjustedAbsorbance - Number(intercept || 0)) / numericSlope
       : NaN;
-    const originalConcentration = measuredConcentration * Math.max(0, Number(dilution) || 0);
+    // A dilution factor of 0 has no physical meaning. Keep the core safe even
+    // when it is called outside the UI, where the select already starts at 1×.
+    const dilutionFactor = Math.max(1, Number(dilution) || 1);
+    const originalConcentration = measuredConcentration * dilutionFactor;
     const volume = Number(extractionVolume);
     const mass = Number(sampleMass);
     const proteinContent = Number.isFinite(originalConcentration) && Number.isFinite(volume) && Number.isFinite(mass) && mass > 0
@@ -94,6 +97,7 @@
       ...summary,
       adjustedAbsorbance,
       measuredConcentration,
+      dilutionFactor,
       originalConcentration,
       proteinContent,
     };

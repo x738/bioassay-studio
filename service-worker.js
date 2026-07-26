@@ -1,13 +1,13 @@
-const CACHE_NAME = 'bioassay-studio-v2.8.1';
+const CACHE_NAME = 'bioassay-studio-v2.8.2';
 const APP_SHELL = [
   './',
   './index.html',
-  './styles.css?v=2.8.1',
-  './experiment-library.css?v=2.8.1',
-  './analysis-core.js?v=2.8.1',
-  './experiment-core.js?v=2.8.1',
-  './app.js?v=2.8.1',
-  './experiment-library.js?v=2.8.1',
+  './styles.css?v=2.8.2',
+  './experiment-library.css?v=2.8.2',
+  './analysis-core.js?v=2.8.2',
+  './experiment-core.js?v=2.8.2',
+  './app.js?v=2.8.2',
+  './experiment-library.js?v=2.8.2',
   './privacy.html',
   './manifest.webmanifest',
   './icon.svg',
@@ -17,6 +17,14 @@ const APP_SHELL = [
   './vendor/UTIF.js',
   './vendor/UTIF-LICENSE.txt',
   './vendor/SHEETJS-LICENSE.txt',
+  './vendor/tesseract/tesseract.min.js',
+  './vendor/tesseract/worker.min.js',
+  './vendor/tesseract/core/tesseract-core-lstm.wasm.js',
+  './vendor/tesseract/core/tesseract-core-lstm.wasm',
+  './vendor/tesseract/lang/chi_sim.traineddata.gz',
+  './vendor/tesseract/lang/eng.traineddata.gz',
+  './vendor/tesseract/TESSERACT-JS-LICENSE.txt',
+  './vendor/tesseract/TESSERACT-CORE-LICENSE.txt',
   './THIRD_PARTY_NOTICES.txt',
 ];
 
