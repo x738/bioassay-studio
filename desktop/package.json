@@ -1,6 +1,6 @@
 {
   "name": "bioassay-studio-desktop",
-  "version": "2.9.0",
+  "version": "2.10.0",
   "description": "BioAssay Studio offline scientific data workstation for Windows",
   "main": "main.js",
   "author": "x738",
@@ -11,7 +11,7 @@
     "make-icon": "node tools/make-icon.js",
     "prepare": "npm run sync-web && npm run make-icon",
     "start": "npm run prepare && electron .",
-    "dist:win": "npm run prepare && electron-builder --win nsis --x64 --publish never"
+    "dist:win": "npm run prepare && electron-builder --win nsis --x64 --publish never --config.electronDist=node_modules/electron/dist"
   },
   "devDependencies": {
     "electron": "43.2.0",
