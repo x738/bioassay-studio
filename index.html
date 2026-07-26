@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="zh-CN" data-app-version="2.8.2">
+<html lang="zh-CN" data-app-version="2.9.0">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -9,7 +9,7 @@
     <link rel="icon" href="icon.svg" type="image/svg+xml" />
     <link rel="manifest" href="manifest.webmanifest" />
     <title>BioAssay Studio | 科研数据与实验知识库</title>
-  <link rel="stylesheet" href="styles.css?v=2.8.2" />
+  <link rel="stylesheet" href="styles.css?v=2.9.0" />
   </head>
   <body>
     <header class="app-header">
@@ -103,13 +103,26 @@
               <div class="auto-detect-card">
                 <h4>自动建议</h4>
                 <p>基于图像信号峰值推荐条带与背景 ROI；生成后仍可手动删除、补画或调整。</p>
+                <label>凝胶图像预设
+                  <select id="wbGelPreset">
+                    <option value="sds">SDS-PAGE（常规清晰条带）</option>
+                    <option value="diffuse">弱带 / 弥散条带</option>
+                    <option value="native">Native PAGE / 宽条带</option>
+                    <option value="strict">高对比 / 过曝图（严格收边）</option>
+                  </select>
+                </label>
+                <div class="wb-guide-controls">
+                  <button id="editWbGuide" type="button">绘制引导搜索区</button>
+                  <button id="clearWbGuide" type="button" disabled>清除引导区</button>
+                  <span id="wbGuideNote">可先框住目标条带所在膜区域，再在该区域内自动识别。</span>
+                </div>
                 <label>识别灵敏度 <span class="range-value" id="autoSensitivityValue">65</span>
                   <input id="autoSensitivity" type="range" min="35" max="90" value="65" />
                 </label>
                 <label>最大候选条带 <span class="field-hint">默认每泳道仅取主条带</span>
                   <input id="autoMaxBands" type="number" min="1" max="96" value="24" />
                 </label>
-                <label>预期泳道/条带数 <span class="field-hint">不含 Marker；按实际样品泳道数填写</span>
+                <label>预期泳道数 <span class="field-hint">不含 Marker；多排条带仍只填横向泳道数</span>
                   <input id="autoLaneCount" type="number" min="1" max="96" placeholder="留空自动" />
                 </label>
                 <label>忽略左侧 Marker 区域（%） <span class="field-hint">0 表示不忽略</span>
@@ -154,6 +167,10 @@
                 <div id="wbViewToolbar" class="wb-view-toolbar">
                   <button id="focusWbView" type="button" disabled>聚焦识别区域</button>
                   <button id="resetWbView" type="button" disabled>显示完整原图</button>
+                  <span class="wb-zoom-separator" aria-hidden="true"></span>
+                  <button id="zoomWbOut" type="button" disabled aria-label="缩小图像">−</button>
+                  <button id="resetWbZoom" type="button" disabled>100%</button>
+                  <button id="zoomWbIn" type="button" disabled aria-label="放大图像">＋</button>
                   <span id="wbViewNote">完整原图</span>
                 </div>
                 <div id="wbViewport" class="wb-analysis-viewport">
@@ -164,7 +181,7 @@
                   </div>
                 </div>
               </div>
-              <div class="canvas-hint">操作提示：空白处拖动可新建 ROI；拖动框内部可移动，拖动选中框的四边/四角可缩放；Delete 删除；Ctrl+Z/Ctrl+Y 撤销/重做。</div>
+              <div class="canvas-hint">操作提示：滚轮以指针为中心缩放；按住空格拖动或使用鼠标中键平移；空白处拖动可新建 ROI；框内部可移动，四边/四角可缩放；Delete 删除；Ctrl+Z/Ctrl+Y 撤销/重做。</div>
             </div>
           </div>
 
@@ -466,7 +483,7 @@
     </main>
 
     <footer class="app-footer">
-      <div><strong>BioAssay Studio v2.8.2</strong><span>科研数据与实验知识库均在本机处理，网站不接收上传内容。</span></div>
+      <div><strong>BioAssay Studio v2.9.0</strong><span>科研数据与实验知识库均在本机处理，网站不接收上传内容。</span></div>
       <nav aria-label="网站信息"><a href="privacy.html">隐私与数据处理</a><a href="THIRD_PARTY_NOTICES.txt">第三方许可</a><a href="README.md">使用说明</a></nav>
     </footer>
 
@@ -480,8 +497,8 @@
     </dialog>
 
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
-    <script src="analysis-core.js?v=2.8.2"></script>
+    <script src="analysis-core.js?v=2.9.0"></script>
     <script src="vendor/chart.umd.js"></script>
-    <script src="app.js?v=2.8.2"></script>
+    <script src="app.js?v=2.9.0"></script>
   </body>
 </html>

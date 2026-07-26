@@ -7,7 +7,7 @@
   const toast = $('#toast');
   const sheetDialog = $('#sheetDialog');
   const core = window.BioAssayCore;
-  const APP_VERSION = document.documentElement.dataset.appVersion || '2.8.2';
+  const APP_VERSION = document.documentElement.dataset.appVersion || '2.9.0';
   const auditLog = [];
   const history = { undo: [], redo: [], applying: false, max: 50 };
   const resourcePromises = new Map();
@@ -45,6 +45,60 @@
     viewBounds: null,
     viewMode: 'full',
     viewAngle: 0,
+    guide: null,
+    guideEditing: false,
+    guideInteraction: null,
+    zoom: 1,
+    panCenter: null,
+    panKey: false,
+    panning: null,
+  };
+
+  const WB_DETECTION_PRESETS = {
+    sds: {
+      key: 'sds',
+      label: 'SDS-PAGE',
+      mapMaxSide: 900,
+      thresholdFraction: 0.095,
+      noiseMultiplier: 1.3,
+      maximumGapFraction: 0.035,
+      paddingFraction: 0.06,
+      verticalPaddingFraction: 0.34,
+      minimumWidthFraction: 0.2,
+    },
+    diffuse: {
+      key: 'diffuse',
+      label: '弱带 / 弥散',
+      mapMaxSide: 1000,
+      thresholdFraction: 0.055,
+      noiseMultiplier: 1.05,
+      maximumGapFraction: 0.065,
+      paddingFraction: 0.1,
+      verticalPaddingFraction: 0.48,
+      minimumWidthFraction: 0.24,
+    },
+    native: {
+      key: 'native',
+      label: 'Native PAGE / 宽条带',
+      mapMaxSide: 1000,
+      thresholdFraction: 0.045,
+      noiseMultiplier: 0.95,
+      maximumGapFraction: 0.085,
+      paddingFraction: 0.12,
+      verticalPaddingFraction: 0.52,
+      minimumWidthFraction: 0.3,
+    },
+    strict: {
+      key: 'strict',
+      label: '高对比 / 过曝',
+      mapMaxSide: 900,
+      thresholdFraction: 0.145,
+      noiseMultiplier: 1.65,
+      maximumGapFraction: 0.025,
+      paddingFraction: 0.035,
+      verticalPaddingFraction: 0.28,
+      minimumWidthFraction: 0.17,
+    },
   };
 
   const pair = {
@@ -230,7 +284,7 @@
 
   function editableSnapshot() {
     return {
-      wb: { rois: cloneData(wb.rois), referenceId: wb.referenceId, profileRoiId: wb.profileRoiId, selectedId: wb.selectedId, backgroundMode: wb.backgroundMode, nextId: wb.nextId },
+      wb: { rois: cloneData(wb.rois), referenceId: wb.referenceId, profileRoiId: wb.profileRoiId, selectedId: wb.selectedId, backgroundMode: wb.backgroundMode, nextId: wb.nextId, guide: wb.guide ? cloneData(wb.guide) : null },
       pair: {
         baseline: pair.baseline, defaultLoadVolume: pair.defaultLoadVolume, loads: cloneData(pair.loads),
         reference: { rois: cloneData(pair.reference.rois), nextId: pair.reference.nextId },
@@ -248,6 +302,8 @@
     if (!snapshot) return;
     history.applying = true;
     Object.assign(wb, cloneData(snapshot.wb || {}));
+    wb.guideEditing = false;
+    wb.guideInteraction = null;
     pair.baseline = snapshot.pair?.baseline || '';
     pair.defaultLoadVolume = number(snapshot.pair?.defaultLoadVolume, 20);
     pair.loads = cloneData(snapshot.pair?.loads || {});
@@ -886,15 +942,72 @@
     ingestGrid(demo.headers, demo.grid);
   }
 
+  function currentWbPreset() {
+    return WB_DETECTION_PRESETS[$('#wbGelPreset')?.value] || WB_DETECTION_PRESETS.sds;
+  }
+
+  function wbBaseViewBounds() {
+    if (!wb.image) return null;
+    if (wb.viewMode === 'focus' && wb.viewBounds) return { ...wb.viewBounds };
+    return { x: 0, y: 0, width: canvas.width, height: canvas.height };
+  }
+
+  function wbEffectiveViewBounds() {
+    const base = wbBaseViewBounds();
+    if (!base) return null;
+    const zoom = clamp(number(wb.zoom, 1), 1, 8);
+    if (zoom <= 1.0001) return base;
+    const width = Math.max(2, base.width / zoom);
+    const height = Math.max(2, base.height / zoom);
+    const defaultCenter = { x: base.x + base.width / 2, y: base.y + base.height / 2 };
+    const center = wb.panCenter || defaultCenter;
+    const centerX = clamp(center.x, base.x + width / 2, base.x + base.width - width / 2);
+    const centerY = clamp(center.y, base.y + height / 2, base.y + base.height - height / 2);
+    return { x: centerX - width / 2, y: centerY - height / 2, width, height };
+  }
+
+  function resetWbNavigation() {
+    wb.zoom = 1;
+    wb.panCenter = null;
+    wb.panning = null;
+  }
+
+  function setWbZoom(nextZoom, clientPoint = null) {
+    if (!wb.image) return;
+    const previousBounds = wbEffectiveViewBounds();
+    const base = wbBaseViewBounds();
+    const previousZoom = clamp(number(wb.zoom, 1), 1, 8);
+    const zoom = clamp(number(nextZoom, previousZoom), 1, 8);
+    if (!previousBounds || !base || Math.abs(zoom - previousZoom) < 0.001) return;
+    let anchor = { x: previousBounds.x + previousBounds.width / 2, y: previousBounds.y + previousBounds.height / 2 };
+    let ux = 0.5;
+    let uy = 0.5;
+    if (clientPoint) {
+      anchor = canvasPoint(clientPoint);
+      const rect = (wb.viewMode === 'focus' || previousZoom > 1) ? wbViewport.getBoundingClientRect() : canvas.getBoundingClientRect();
+      ux = clamp((clientPoint.clientX - rect.left) / Math.max(1, rect.width), 0, 1);
+      uy = clamp((clientPoint.clientY - rect.top) / Math.max(1, rect.height), 0, 1);
+    }
+    wb.zoom = zoom;
+    const nextWidth = base.width / zoom;
+    const nextHeight = base.height / zoom;
+    const x = clamp(anchor.x - ux * nextWidth, base.x, base.x + base.width - nextWidth);
+    const y = clamp(anchor.y - uy * nextHeight, base.y, base.y + base.height - nextHeight);
+    wb.panCenter = { x: x + nextWidth / 2, y: y + nextHeight / 2 };
+    drawWb();
+  }
+
   function canvasPoint(event) {
-    if (wb.viewMode === 'focus' && wb.viewBounds) {
+    const cropped = wb.viewMode === 'focus' || number(wb.zoom, 1) > 1.0001;
+    if (cropped) {
       const rect = wbViewport.getBoundingClientRect();
-      const bounds = wb.viewBounds;
+      const bounds = wbEffectiveViewBounds();
+      if (!bounds) return { x: 0, y: 0 };
       const displayedX = bounds.x + clamp((event.clientX - rect.left) / Math.max(1, rect.width), 0, 1) * bounds.width;
       const displayedY = bounds.y + clamp((event.clientY - rect.top) / Math.max(1, rect.height), 0, 1) * bounds.height;
       const centerX = bounds.x + bounds.width / 2;
       const centerY = bounds.y + bounds.height / 2;
-      const angle = -number(wb.viewAngle, 0) * Math.PI / 180;
+      const angle = wb.viewMode === 'focus' ? -number(wb.viewAngle, 0) * Math.PI / 180 : 0;
       const dx = displayedX - centerX;
       const dy = displayedY - centerY;
       return {
@@ -953,10 +1066,11 @@
   ];
 
   function wbImagePixelsForCss(cssPixels) {
-    const focused = wb.viewMode === 'focus' && wb.viewBounds;
-    const sourceWidth = focused ? wb.viewBounds.width : canvas.width;
-    const sourceHeight = focused ? wb.viewBounds.height : canvas.height;
-    const displayRect = focused ? wbViewport.getBoundingClientRect() : canvas.getBoundingClientRect();
+    const cropped = wb.viewMode === 'focus' || number(wb.zoom, 1) > 1.0001;
+    const bounds = wbEffectiveViewBounds();
+    const sourceWidth = cropped && bounds ? bounds.width : canvas.width;
+    const sourceHeight = cropped && bounds ? bounds.height : canvas.height;
+    const displayRect = cropped ? wbViewport.getBoundingClientRect() : canvas.getBoundingClientRect();
     const scaleX = sourceWidth / Math.max(1, displayRect.width);
     const scaleY = sourceHeight / Math.max(1, displayRect.height);
     return Math.max(1, cssPixels * Math.max(scaleX, scaleY));
@@ -1013,10 +1127,74 @@
     delete roi.confidence;
   }
 
+  function resizeWbGuide(resizeState, point) {
+    if (!wb.guide) return;
+    const minimumSize = Math.max(6, Math.round(wbImagePixelsForCss(8)));
+    const dx = point.x - resizeState.start.x;
+    const dy = point.y - resizeState.start.y;
+    let left = resizeState.original.x;
+    let top = resizeState.original.y;
+    let right = resizeState.original.x + resizeState.original.width;
+    let bottom = resizeState.original.y + resizeState.original.height;
+    if (resizeState.handle.includes('w')) left = clamp(resizeState.original.x + dx, 0, right - minimumSize);
+    if (resizeState.handle.includes('e')) right = clamp(resizeState.original.x + resizeState.original.width + dx, left + minimumSize, canvas.width);
+    if (resizeState.handle.includes('n')) top = clamp(resizeState.original.y + dy, 0, bottom - minimumSize);
+    if (resizeState.handle.includes('s')) bottom = clamp(resizeState.original.y + resizeState.original.height + dy, top + minimumSize, canvas.height);
+    wb.guide = { x: Math.round(left), y: Math.round(top), width: Math.round(right - left), height: Math.round(bottom - top) };
+  }
+
+  function updateWbGuideUi() {
+    const editButton = $('#editWbGuide');
+    const clearButton = $('#clearWbGuide');
+    const note = $('#wbGuideNote');
+    if (!editButton || !clearButton || !note) return;
+    editButton.classList.toggle('is-active', wb.guideEditing);
+    editButton.textContent = wb.guideEditing ? '完成引导区设置' : (wb.guide ? '调整引导搜索区' : '绘制引导搜索区');
+    clearButton.disabled = !wb.guide;
+    if (!wb.guide) note.textContent = wb.guideEditing ? '请在图像上拖动，框住需要搜索的膜区域。' : '可先框住目标条带所在膜区域，再在该区域内自动识别。';
+    else note.textContent = `引导区 ${Math.round(wb.guide.width)} × ${Math.round(wb.guide.height)} px；自动识别只搜索该范围。`;
+  }
+
+  function drawWbGuide() {
+    if (!wb.guide) return;
+    const guide = wb.guide;
+    const lineWidth = Math.max(1, wbImagePixelsForCss(1.5));
+    const labelFontSize = Math.max(9, wbImagePixelsForCss(11));
+    ctx.save();
+    ctx.lineWidth = lineWidth;
+    ctx.strokeStyle = '#ffbf38';
+    ctx.fillStyle = wb.guideEditing ? 'rgba(255, 191, 56, .12)' : 'rgba(255, 191, 56, .06)';
+    ctx.setLineDash([wbImagePixelsForCss(7), wbImagePixelsForCss(5)]);
+    ctx.fillRect(guide.x, guide.y, guide.width, guide.height);
+    ctx.strokeRect(guide.x, guide.y, guide.width, guide.height);
+    ctx.setLineDash([]);
+    ctx.font = `700 ${labelFontSize}px sans-serif`;
+    const label = '引导搜索区';
+    const padding = Math.max(3, wbImagePixelsForCss(4));
+    const labelHeight = labelFontSize * 1.45;
+    const labelWidth = ctx.measureText(label).width + padding * 2;
+    const labelY = Math.max(0, guide.y - labelHeight);
+    ctx.fillStyle = '#ffbf38';
+    ctx.fillRect(guide.x, labelY, labelWidth, labelHeight);
+    ctx.fillStyle = '#2f2100';
+    ctx.fillText(label, guide.x + padding, labelY + labelFontSize + padding * 0.3);
+    if (wb.guideEditing) {
+      const size = wbImagePixelsForCss(10);
+      ctx.strokeStyle = '#7a5000';
+      ctx.fillStyle = '#ffffff';
+      wbResizeHandles(guide).forEach(handle => {
+        ctx.fillRect(handle.x - size / 2, handle.y - size / 2, size, size);
+        ctx.strokeRect(handle.x - size / 2, handle.y - size / 2, size, size);
+      });
+    }
+    ctx.restore();
+  }
+
   function drawWb() {
     if (!wb.image) { canvas.width = 0; canvas.height = 0; applyWbViewport(); return; }
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.drawImage(wb.image, 0, 0, canvas.width, canvas.height);
+    drawWbGuide();
     wb.rois.forEach(roi => drawRoi(roi, roi.type, roi.name));
     const selected = wb.rois.find(roi => roi.id === wb.selectedId);
     if (selected) {
@@ -1030,6 +1208,7 @@
     }
     if (wb.tempROI) drawRoi(wb.tempROI, wb.tempROI.type, wb.tempROI.name, true);
     applyWbViewport();
+    updateWbGuideUi();
   }
 
   function wbFocusBoundsFromBands(bands) {
@@ -1068,16 +1247,22 @@
   function applyWbViewport() {
     if (!wbViewport) return;
     const focused = Boolean(wb.image && wb.viewMode === 'focus' && wb.viewBounds);
-    wbViewport.classList.toggle('is-focused', focused);
+    const cropped = Boolean(wb.image && (focused || number(wb.zoom, 1) > 1.0001));
+    const zoom = clamp(number(wb.zoom, 1), 1, 8);
+    wbViewport.classList.toggle('is-focused', cropped);
     $('#focusWbView').disabled = !wb.image || !wb.viewBounds || focused;
-    $('#resetWbView').disabled = !wb.image || !focused;
+    $('#resetWbView').disabled = !wb.image || (!focused && zoom <= 1.0001);
+    $('#zoomWbOut').disabled = !wb.image || zoom <= 1.0001;
+    $('#zoomWbIn').disabled = !wb.image || zoom >= 8;
+    $('#resetWbZoom').disabled = !wb.image || zoom <= 1.0001;
+    $('#resetWbZoom').textContent = `${Math.round(zoom * 100)}%`;
     if (!wb.image) {
       wbViewport.style.removeProperty('--wb-view-aspect');
       canvas.removeAttribute('style');
       $('#wbViewNote').textContent = '完整原图';
       return;
     }
-    if (!focused) {
+    if (!cropped) {
       wbViewport.style.removeProperty('--wb-view-aspect');
       canvas.style.position = '';
       canvas.style.width = '';
@@ -1090,7 +1275,7 @@
       $('#wbViewNote').textContent = `完整原图 · ${canvas.width} × ${canvas.height}px`;
       return;
     }
-    const bounds = wb.viewBounds;
+    const bounds = wbEffectiveViewBounds();
     wbViewport.style.setProperty('--wb-view-aspect', `${bounds.width} / ${bounds.height}`);
     canvas.style.position = 'absolute';
     canvas.style.width = `${canvas.width / bounds.width * 100}%`;
@@ -1101,8 +1286,10 @@
     const centerX = (bounds.x + bounds.width / 2) / canvas.width * 100;
     const centerY = (bounds.y + bounds.height / 2) / canvas.height * 100;
     canvas.style.transformOrigin = `${centerX}% ${centerY}%`;
-    canvas.style.transform = Math.abs(wb.viewAngle) >= 0.05 ? `rotate(${wb.viewAngle}deg)` : '';
-    $('#wbViewNote').textContent = `识别裁剪区 · ${bounds.width} × ${bounds.height}px · 显示旋正 ${fmt(wb.viewAngle, 2)}° · 定量读取原图坐标`;
+    canvas.style.transform = focused && Math.abs(wb.viewAngle) >= 0.05 ? `rotate(${wb.viewAngle}deg)` : '';
+    const modeText = focused ? '识别裁剪区' : '原图放大';
+    const deskewText = focused ? ` · 显示旋正 ${fmt(wb.viewAngle, 2)}°` : '';
+    $('#wbViewNote').textContent = `${modeText} · ${Math.round(bounds.width)} × ${Math.round(bounds.height)}px · ${Math.round(zoom * 100)}%${deskewText} · 定量读取原图坐标`;
   }
 
   function regionMeasurement(source, imageCtx, roi, invert) {
@@ -2096,9 +2283,31 @@
     };
   }
 
-  function findBandCandidatesFromMap(map, sourceWidth, sourceHeight, sensitivity, expectedLaneCount = 0, bandsPerLane = 5, minimumBandGap = 0, ignoredLeftPercent = 0, edgePaddingPixels = 4) {
+  function findBandCandidatesFromMap(map, sourceWidth, sourceHeight, sensitivity, expectedLaneCount = 0, bandsPerLane = 5, minimumBandGap = 0, ignoredLeftPercent = 0, edgePaddingPixels = 4, guide = null, preset = WB_DETECTION_PRESETS.sds) {
     const { signal, width, height, scale } = map;
-    const detectedBounds = findBlotBounds(map);
+    let detectedBounds = findBlotBounds(map);
+    let guideApplied = false;
+    if (guide && guide.width >= 4 && guide.height >= 4) {
+      const guideBounds = {
+        x0: clamp(Math.floor(guide.x / scale), 0, width - 2),
+        x1: clamp(Math.ceil((guide.x + guide.width) / scale) - 1, 1, width - 1),
+        y0: clamp(Math.floor(guide.y / scale), 0, height - 2),
+        y1: clamp(Math.ceil((guide.y + guide.height) / scale) - 1, 1, height - 1),
+      };
+      const intersection = {
+        x0: Math.max(detectedBounds.x0, guideBounds.x0),
+        x1: Math.min(detectedBounds.x1, guideBounds.x1),
+        y0: Math.max(detectedBounds.y0, guideBounds.y0),
+        y1: Math.min(detectedBounds.y1, guideBounds.y1),
+      };
+      if (intersection.x1 - intersection.x0 >= 8 && intersection.y1 - intersection.y0 >= 6) {
+        detectedBounds = intersection;
+        guideApplied = true;
+      } else if (guideBounds.x1 - guideBounds.x0 >= 8 && guideBounds.y1 - guideBounds.y0 >= 6) {
+        detectedBounds = guideBounds;
+        guideApplied = true;
+      }
+    }
     const normalizedIgnoredLeft = clamp(number(ignoredLeftPercent, 0), 0, 40);
     const ignoredLeftEdge = clamp(Math.round(width * normalizedIgnoredLeft / 100), 0, Math.max(0, width - 3));
     let rawBounds = {
@@ -2193,7 +2402,7 @@
         let end = peak.index;
         while (start > 0 && residual[start - 1] >= localFloor && end - start < maxBandHeight) start -= 1;
         while (end < residual.length - 1 && residual[end + 1] >= localFloor && end - start < maxBandHeight) end += 1;
-        const paddingY = Math.max(2, Math.round((end - start + 1) * 0.42));
+        const paddingY = Math.max(2, Math.round((end - start + 1) * number(preset.verticalPaddingFraction, 0.42)));
         const leftLimit = laneIndex ? Math.round((laneCenters[laneIndex - 1] + laneCenter) / 2) : Math.round(laneCenter - typicalPitch * 0.5);
         const rightLimit = laneIndex < laneCenters.length - 1 ? Math.round((laneCenter + laneCenters[laneIndex + 1]) / 2) : Math.round(laneCenter + typicalPitch * 0.5);
         const leftPitch = laneIndex ? laneCenter - laneCenters[laneIndex - 1] : typicalPitch;
@@ -2228,11 +2437,11 @@
         const maximumEdgeGap = Math.max(1, Math.round(typicalPitch * 0.035));
         const laneWidth = lane.x1 - lane.x0 + 1;
         const adaptiveBounds = core.refineSignalBounds(horizontal, {
-          maximumGap: maximumEdgeGap,
+          maximumGap: Math.max(maximumEdgeGap, Math.round(horizontal.length * number(preset.maximumGapFraction, 0.035))),
           minimumPadding: Math.max(1, Math.round(requestedEdgePadding)),
-          paddingFraction: 0.025,
-          thresholdFraction: 0.11,
-          noiseMultiplier: 1.25,
+          paddingFraction: number(preset.paddingFraction, 0.06),
+          thresholdFraction: number(preset.thresholdFraction, 0.095),
+          noiseMultiplier: number(preset.noiseMultiplier, 1.3),
         });
         const candidateScore = clamp((peak.score - stats.average) / Math.max(stats.spread * 4, 1), 0.01, 0.99);
         const refinedCenter = adaptiveBounds.usable ? searchX0 + adaptiveBounds.center : laneCenter;
@@ -2243,7 +2452,9 @@
           fittedRight = Math.max(fittedRight, Math.round(lane.signalX1 + requestedEdgePadding));
         }
         const weakBand = Boolean(peak.forcedWeak || lane.weakGapFill || candidateScore < 0.16);
-        const minimumWidthFraction = weakBand ? 0.18 : 0.22;
+        const minimumWidthFraction = weakBand
+          ? Math.max(0.15, number(preset.minimumWidthFraction, 0.2) - 0.03)
+          : number(preset.minimumWidthFraction, 0.2);
         const minimumWidthBase = Math.min(laneWidth, typicalPitch * 0.9);
         const minimumRoiWidth = Math.min(searchX1 - searchX0 + 1, Math.max(5, Math.round(minimumWidthBase * minimumWidthFraction)));
         if (fittedRight - fittedLeft + 1 < minimumRoiWidth) {
@@ -2273,6 +2484,8 @@
           score: candidateScore,
           laneIndex,
           bandIndex,
+          laneCenter: laneCenter * scale,
+          lanePitch: typicalPitch * scale,
           edgeConfidence: adaptiveBounds.confidence,
           edgeClipped: Boolean(adaptiveBounds.clippedLeft || adaptiveBounds.clippedRight),
           guardExpanded,
@@ -2296,13 +2509,156 @@
       rowGuideCount: rowFocus?.rows?.length || 0,
       deskewAngle: rowFocus?.deskewAngle || 0,
       effectiveBandsPerLane,
+      guideApplied,
+      preset: preset.key || 'sds',
     };
   }
 
-  function findWbBandCandidates(map, expectedLaneCount = 0) {
+  function findWbBandCandidates(map, expectedLaneCount = 0, guide = null, preset = currentWbPreset()) {
     const bandsPerLane = clamp(Math.round(number($('#autoBandsPerLane').value, 0)), 0, 8);
     const minimumBandGap = clamp(Math.round(number($('#autoBandGap').value, 12)), 2, 160);
-    return findBandCandidatesFromMap(map, canvas.width, canvas.height, number($('#autoSensitivity').value, 65), expectedLaneCount, bandsPerLane, minimumBandGap, number($('#autoMarkerPercent').value, 0), number($('#autoEdgePadding').value, 4));
+    return findBandCandidatesFromMap(map, canvas.width, canvas.height, number($('#autoSensitivity').value, 65), expectedLaneCount, bandsPerLane, minimumBandGap, number($('#autoMarkerPercent').value, 0), number($('#autoEdgePadding').value, 4), guide, preset);
+  }
+
+  function wbSourceSignalRegion(rect) {
+    const width = canvas.width;
+    const height = canvas.height;
+    const x0 = clamp(Math.floor(rect.x), 0, Math.max(0, width - 1));
+    const y0 = clamp(Math.floor(rect.y), 0, Math.max(0, height - 1));
+    const x1 = clamp(Math.ceil(rect.x + rect.width), x0 + 1, width);
+    const y1 = clamp(Math.ceil(rect.y + rect.height), y0 + 1, height);
+    const regionWidth = x1 - x0;
+    const regionHeight = y1 - y0;
+    const values = new Float32Array(regionWidth * regionHeight);
+    const invert = $('#invertIntensity').checked;
+    const maximum = wb.source?.raw?.maxValue || 255;
+    const rgba = wb.source?.raw?.values ? null : wb.imageCtx.getImageData(x0, y0, regionWidth, regionHeight).data;
+    for (let y = 0; y < regionHeight; y += 1) {
+      for (let x = 0; x < regionWidth; x += 1) {
+        let gray;
+        if (wb.source?.raw?.values) gray = wb.source.raw.values[(y0 + y) * width + x0 + x];
+        else {
+          const offset = (y * regionWidth + x) * 4;
+          gray = 0.299 * rgba[offset] + 0.587 * rgba[offset + 1] + 0.114 * rgba[offset + 2];
+        }
+        values[y * regionWidth + x] = invert ? maximum - gray : gray;
+      }
+    }
+    return { x0, y0, width: regionWidth, height: regionHeight, values };
+  }
+
+  function strongestFractionMean(values, keepFraction = 0.42) {
+    if (!values.length) return 0;
+    values.sort((a, b) => b - a);
+    const keep = Math.max(1, Math.round(values.length * keepFraction));
+    let total = 0;
+    for (let index = 0; index < keep; index += 1) total += values[index];
+    return total / keep;
+  }
+
+  function refineWbCandidateAtSource(candidate, allCandidates, preset = currentWbPreset()) {
+    const laneCenter = number(candidate.laneCenter, candidate.x + candidate.width / 2);
+    const lanePitch = Math.max(candidate.width * 1.4, number(candidate.lanePitch, candidate.width * 2.4));
+    const sameRow = allCandidates
+      .filter(item => item !== candidate && item.bandIndex === candidate.bandIndex)
+      .sort((left, right) => number(left.laneCenter, left.x + left.width / 2) - number(right.laneCenter, right.x + right.width / 2));
+    const leftNeighbor = [...sameRow].reverse().find(item => number(item.laneCenter, item.x + item.width / 2) < laneCenter);
+    const rightNeighbor = sameRow.find(item => number(item.laneCenter, item.x + item.width / 2) > laneCenter);
+    const leftLimit = leftNeighbor
+      ? (number(leftNeighbor.laneCenter, leftNeighbor.x + leftNeighbor.width / 2) + laneCenter) / 2
+      : laneCenter - lanePitch * 0.5;
+    const rightLimit = rightNeighbor
+      ? (number(rightNeighbor.laneCenter, rightNeighbor.x + rightNeighbor.width / 2) + laneCenter) / 2
+      : laneCenter + lanePitch * 0.5;
+
+    const bandCenterY = candidate.y + candidate.height / 2;
+    const sameLane = allCandidates
+      .filter(item => item !== candidate && item.laneIndex === candidate.laneIndex)
+      .sort((left, right) => left.y + left.height / 2 - (right.y + right.height / 2));
+    const upperNeighbor = [...sameLane].reverse().find(item => item.y + item.height / 2 < bandCenterY);
+    const lowerNeighbor = sameLane.find(item => item.y + item.height / 2 > bandCenterY);
+    const upperLimit = upperNeighbor
+      ? ((upperNeighbor.y + upperNeighbor.height / 2) + bandCenterY) / 2
+      : candidate.y - candidate.height * 0.75;
+    const lowerLimit = lowerNeighbor
+      ? ((lowerNeighbor.y + lowerNeighbor.height / 2) + bandCenterY) / 2
+      : candidate.y + candidate.height * 1.75;
+    const searchRect = {
+      x: clamp(Math.floor(Math.max(leftLimit + 1, laneCenter - lanePitch * 0.48)), 0, canvas.width - 2),
+      y: clamp(Math.floor(upperLimit), 0, canvas.height - 2),
+      width: 0,
+      height: 0,
+    };
+    const searchRight = clamp(Math.ceil(Math.min(rightLimit - 1, laneCenter + lanePitch * 0.48)), searchRect.x + 2, canvas.width);
+    const searchBottom = clamp(Math.ceil(lowerLimit), searchRect.y + 2, canvas.height);
+    searchRect.width = searchRight - searchRect.x;
+    searchRect.height = searchBottom - searchRect.y;
+    if (searchRect.width < 5 || searchRect.height < 5) return candidate;
+
+    const region = wbSourceSignalRegion(searchRect);
+    const horizontal = [];
+    for (let x = 0; x < region.width; x += 1) {
+      const column = [];
+      for (let y = 0; y < region.height; y += 1) column.push(region.values[y * region.width + x]);
+      horizontal.push(strongestFractionMean(column));
+    }
+    const requestedPadding = clamp(number($('#autoEdgePadding').value, 4), 0, 30);
+    const horizontalBounds = core.refineSignalBounds(horizontal, {
+      maximumGap: Math.max(1, Math.round(horizontal.length * number(preset.maximumGapFraction, 0.035))),
+      minimumPadding: Math.max(1, Math.round(requestedPadding)),
+      paddingFraction: number(preset.paddingFraction, 0.06),
+      thresholdFraction: number(preset.thresholdFraction, 0.095),
+      noiseMultiplier: number(preset.noiseMultiplier, 1.3),
+      smoothRadius: Math.max(1, Math.round(horizontal.length * 0.006)),
+    });
+
+    let refinedX = candidate.x;
+    let refinedWidth = candidate.width;
+    if (horizontalBounds.usable && horizontalBounds.confidence >= 0.04) {
+      refinedX = region.x0 + horizontalBounds.left;
+      refinedWidth = horizontalBounds.right - horizontalBounds.left + 1;
+    }
+    const xStart = clamp(Math.floor(refinedX - region.x0), 0, region.width - 2);
+    const xEnd = clamp(Math.ceil(refinedX + refinedWidth - region.x0), xStart + 1, region.width);
+    const vertical = [];
+    for (let y = 0; y < region.height; y += 1) {
+      const row = [];
+      for (let x = xStart; x < xEnd; x += 1) row.push(region.values[y * region.width + x]);
+      vertical.push(strongestFractionMean(row, 0.5));
+    }
+    const verticalBounds = core.refineSignalBounds(vertical, {
+      maximumGap: Math.max(1, Math.round(vertical.length * 0.035)),
+      minimumPadding: 1,
+      paddingFraction: number(preset.verticalPaddingFraction, 0.34) * 0.34,
+      thresholdFraction: Math.min(0.2, number(preset.thresholdFraction, 0.095) * 1.12),
+      noiseMultiplier: number(preset.noiseMultiplier, 1.3),
+      smoothRadius: Math.max(1, Math.round(vertical.length * 0.018)),
+    });
+    let refinedY = candidate.y;
+    let refinedHeight = candidate.height;
+    if (verticalBounds.usable && verticalBounds.confidence >= 0.035) {
+      refinedY = region.y0 + verticalBounds.left;
+      refinedHeight = verticalBounds.right - verticalBounds.left + 1;
+    }
+    const minimumWidth = Math.max(4, Math.round(lanePitch * number(preset.minimumWidthFraction, 0.2) * 0.75));
+    if (refinedWidth < minimumWidth) {
+      const center = refinedX + refinedWidth / 2;
+      refinedWidth = Math.min(searchRect.width, minimumWidth);
+      refinedX = center - refinedWidth / 2;
+    }
+    refinedX = clamp(Math.round(refinedX), Math.round(leftLimit + 1), Math.max(Math.round(leftLimit + 1), Math.round(rightLimit - refinedWidth - 1)));
+    refinedWidth = clamp(Math.round(refinedWidth), 3, canvas.width - refinedX);
+    refinedY = clamp(Math.round(refinedY), 0, canvas.height - 3);
+    refinedHeight = clamp(Math.round(refinedHeight), 3, canvas.height - refinedY);
+    return {
+      ...candidate,
+      x: refinedX,
+      y: refinedY,
+      width: refinedWidth,
+      height: refinedHeight,
+      edgeConfidence: Math.max(number(candidate.edgeConfidence, 0), number(horizontalBounds.confidence, 0)),
+      sourceRefined: Boolean(horizontalBounds.usable || verticalBounds.usable),
+    };
   }
 
   function findWbBackgroundCandidate(map, bounds, exclusions = []) {
@@ -2394,8 +2750,10 @@
     const maxBands = clamp(Math.round(number($('#autoMaxBands').value, 24)), 1, 96);
     const expectedLaneCount = clamp(Math.round(number($('#autoLaneCount').value, 0)), 0, 96);
     const bandsPerLane = clamp(Math.round(number($('#autoBandsPerLane').value, 0)), 0, 8);
+    const preset = currentWbPreset();
     const manualRois = wb.rois.filter(roi => !roi.auto);
-    const detection = findWbBandCandidates(wbSignalMap(), expectedLaneCount);
+    const signalMap = wbSignalMap(preset.mapMaxSide);
+    const detection = findWbBandCandidates(signalMap, expectedLaneCount, wb.guide, preset);
     const detectedBandsPerLane = Math.max(1, detection.effectiveBandsPerLane || bandsPerLane || 1);
     const rawCandidates = detection.candidates.sort((a, b) => b.score - a.score);
     const candidatesByLane = new Map();
@@ -2410,11 +2768,13 @@
     // Keep neighbouring automatic boxes physically separate.  This prevents a
     // diffuse lane and a very weak adjacent lane from being shown as two
     // overlapping ROIs even when their initial peak windows touch.
+    selected = selected.map(candidate => refineWbCandidateAtSource(candidate, selected, preset));
     selected = core.separateNeighborRois(selected, 4);
     if (selected.length) {
       wb.viewBounds = wbFocusBoundsFromBands(selected);
       wb.viewMode = wb.viewBounds ? 'focus' : 'full';
       wb.viewAngle = wbDeskewAngleFromBands(selected);
+      resetWbNavigation();
     }
     const laneOrder = [...new Set(selected.map(candidate => candidate.laneIndex))];
     const bandsSeen = new Map();
@@ -2440,7 +2800,7 @@
     });
     const hasManualBackground = manualRois.some(roi => roi.type === 'background');
     if ($('#autoBackground').checked && !hasManualBackground) {
-      const background = findWbBackgroundCandidate(wbSignalMap(), detection.bounds, selected);
+      const background = findWbBackgroundCandidate(signalMap, detection.bounds, selected);
       if (background) generated.unshift({ id: `roi-${wb.nextId++}`, type: 'background', name: '自动背景', group: '自动识别', auto: true, confidence: null, ...background });
     }
     wb.rois = [...manualRois, ...generated];
@@ -2449,12 +2809,13 @@
     const laneSource = expectedLaneCount ? `按填写的 ${expectedLaneCount} 个泳道` : `自动估计的 ${detection.lanes.length} 个泳道`;
     const markerNote = detection.ignoredLeftPercent ? `，已忽略左侧 ${fmt(detection.ignoredLeftPercent, 0)}% Marker 区域` : '';
     const outlierNote = detection.geometryOutliersRemoved ? `，已排除 ${detection.geometryOutliersRemoved} 个偏离主条带行的边缘伪影` : '';
+    const guideNote = detection.guideApplied ? '，限定在手动引导区内搜索' : '';
     const preprocessingNote = detection.rowGuided
       ? `；识别副本已裁除无关区域并按条带行补偿 ${fmt(wb.viewAngle, 2)}° 倾斜（定量仍读取原始像素）`
       : '';
-    $('#autoDetectionNote').textContent = generated.length ? `已定位膜区域${markerNote}${outlierNote}，并${laneSource}推荐 ${selected.length} 个条带和 ${backgroundCount} 个背景 ROI${preprocessingNote}。候选框已按真实信号边缘精修，请在导出前人工确认。` : '未找到足够清晰的候选条带；请提高灵敏度，或填写预期泳道数后重试。';
+    $('#autoDetectionNote').textContent = generated.length ? `已使用“${preset.label}”预设定位膜区域${guideNote}${markerNote}${outlierNote}，并${laneSource}推荐 ${selected.length} 个条带和 ${backgroundCount} 个背景 ROI${preprocessingNote}。候选框已回到原始分辨率精修边界，请在导出前人工确认。` : '未找到足够清晰的候选条带；请绘制引导搜索区、切换凝胶预设，或填写预期泳道数后重试。';
     updateWb();
-    recordAudit('wb-auto-detect', { expectedLaneCount, ignoredLeftPercent: detection.ignoredLeftPercent, bandsPerLane, selectedBands: selected.length, geometryOutliersRemoved: detection.geometryOutliersRemoved || 0, backgroundCount });
+    recordAudit('wb-auto-detect', { expectedLaneCount, ignoredLeftPercent: detection.ignoredLeftPercent, bandsPerLane, selectedBands: selected.length, geometryOutliersRemoved: detection.geometryOutliersRemoved || 0, backgroundCount, guideApplied: detection.guideApplied, preset: preset.key, sourceRefined: selected.filter(item => item.sourceRefined).length });
     if (generated.length) toastMessage(`自动识别完成：${selected.length} 个候选条带。`);
   }
 
@@ -2788,6 +3149,10 @@
       wb.viewBounds = null;
       wb.viewMode = 'full';
       wb.viewAngle = 0;
+      wb.guide = null;
+      wb.guideEditing = false;
+      wb.guideInteraction = null;
+      resetWbNavigation();
       canvas.width = image.naturalWidth;
       canvas.height = image.naturalHeight;
       wb.imageCtx = analysisContextForImage(image);
@@ -2893,7 +3258,7 @@
 
   function clearWb() {
     pushHistory('清空 WB 工作区');
-    wb.image = null; wb.fileName = ''; wb.imageCtx = null; wb.source = null; wb.rois = []; wb.referenceId = ''; wb.profileRoiId = ''; wb.selectedId = ''; wb.drawing = null; wb.dragging = null; wb.resizing = null; wb.tempROI = null; wb.viewBounds = null; wb.viewMode = 'full'; wb.viewAngle = 0;
+    wb.image = null; wb.fileName = ''; wb.imageCtx = null; wb.source = null; wb.rois = []; wb.referenceId = ''; wb.profileRoiId = ''; wb.selectedId = ''; wb.drawing = null; wb.dragging = null; wb.resizing = null; wb.tempROI = null; wb.viewBounds = null; wb.viewMode = 'full'; wb.viewAngle = 0; wb.guide = null; wb.guideEditing = false; wb.guideInteraction = null; resetWbNavigation();
     canvas.width = 0; canvas.height = 0;
     $('#wbImageInput').value = '';
     $('#wbEmptyState').classList.remove('hide');
@@ -4851,7 +5216,7 @@
   }
 
   const projectControlIds = [
-    'invertIntensity', 'autoSensitivity', 'autoMaxBands', 'autoLaneCount', 'autoMarkerPercent', 'autoEdgePadding', 'autoBandsPerLane', 'autoBandGap', 'autoBackground', 'wbAutoExcludeBad', 'backgroundMode',
+    'invertIntensity', 'wbGelPreset', 'autoSensitivity', 'autoMaxBands', 'autoLaneCount', 'autoMarkerPercent', 'autoEdgePadding', 'autoBandsPerLane', 'autoBandGap', 'autoBackground', 'wbAutoExcludeBad', 'backgroundMode',
     'roiType', 'roiName', 'roiGroup', 'pairAutoBackground', 'pairSensitivity', 'pairLaneCount', 'pairMarkerPercent', 'pairEdgePadding', 'pairDefaultLoadVolume', 'pairAllowSaturatedCalibration',
     'figureLaneScope', 'figureLaneNames', 'figureValues', 'figureLaneCount', 'figureMarkerPercent', 'figureProteinFontSize', 'figureMassFontSize', 'figureValueFontSize', 'figureLaneFontSize',
     'figureCropPadding', 'figureBackgroundStrength', 'figureWhiteBackground', 'figurePreserveColor', 'figureAutoDeskew', 'figureShowValues',
@@ -4934,6 +5299,7 @@
         backgroundMode: wb.backgroundMode,
         nextId: wb.nextId,
         profileRoiId: wb.profileRoiId,
+        guide: wb.guide,
       },
       pair: {
         baseline: pair.baseline,
@@ -5040,6 +5406,10 @@
       wb.backgroundMode = ['global', 'nearest', 'side', 'plane'].includes(savedWb.backgroundMode) ? savedWb.backgroundMode : 'global';
       wb.nextId = Math.max(1, Math.round(number(savedWb.nextId, wb.rois.length + 1)));
       wb.profileRoiId = savedWb.profileRoiId || '';
+      wb.guide = savedWb.guide && Number.isFinite(savedWb.guide.x) ? { ...savedWb.guide } : null;
+      wb.guideEditing = false;
+      wb.guideInteraction = null;
+      resetWbNavigation();
       wb.drawing = null;
       wb.tempROI = null;
       if (wb.image) {
@@ -5181,16 +5551,44 @@
     $('#wbProfileSelect').addEventListener('change', event => { wb.profileRoiId = event.target.value; drawWbProfile(); });
     wbProfileCanvas.addEventListener('click', snapWbProfileToClick);
     $('#autoSensitivity').addEventListener('input', event => { $('#autoSensitivityValue').textContent = event.target.value; });
+    $('#wbGelPreset').addEventListener('change', event => {
+      const preset = WB_DETECTION_PRESETS[event.target.value] || WB_DETECTION_PRESETS.sds;
+      $('#autoDetectionNote').textContent = `已选择“${preset.label}”预设；重新自动识别后生效。`;
+      recordAudit('wb-detection-preset', { preset: preset.key });
+    });
+    $('#editWbGuide').addEventListener('click', () => {
+      if (!wb.image) return toastMessage('请先载入 WB 图片。');
+      wb.guideEditing = !wb.guideEditing;
+      wb.guideInteraction = null;
+      updateWbGuideUi();
+      drawWb();
+      if (wb.guideEditing) toastMessage(wb.guide ? '可拖动引导区内部移动，或拖动四边/四角调整。' : '请在图像上拖动绘制引导搜索区。');
+    });
+    $('#clearWbGuide').addEventListener('click', () => {
+      if (!wb.guide) return;
+      pushHistory('清除 WB 引导区');
+      wb.guide = null;
+      wb.guideInteraction = null;
+      wb.guideEditing = false;
+      updateWbGuideUi();
+      drawWb();
+      recordAudit('wb-guide-cleared');
+    });
     $('#autoDetectWb').addEventListener('click', autoDetectWb);
     $('#focusWbView').addEventListener('click', () => {
       if (!wb.viewBounds) return;
       wb.viewMode = 'focus';
+      resetWbNavigation();
       drawWb();
     });
     $('#resetWbView').addEventListener('click', () => {
       wb.viewMode = 'full';
+      resetWbNavigation();
       drawWb();
     });
+    $('#zoomWbOut').addEventListener('click', () => setWbZoom(number(wb.zoom, 1) / 1.25));
+    $('#zoomWbIn').addEventListener('click', () => setWbZoom(number(wb.zoom, 1) * 1.25));
+    $('#resetWbZoom').addEventListener('click', () => { resetWbNavigation(); drawWb(); });
     $('#wbAutoExcludeBad').addEventListener('change', updateWb);
     $('#clearAutoRois').addEventListener('click', () => {
       const before = wb.rois.length;
@@ -5202,6 +5600,7 @@
       wb.dragging = null;
       wb.resizing = null;
       wb.viewMode = 'full';
+      resetWbNavigation();
       $('#autoDetectionNote').textContent = before === wb.rois.length ? '当前没有自动生成的 ROI。' : '已清除自动识别结果，保留手动 ROI。';
       updateWb();
     });
@@ -5216,9 +5615,60 @@
     ['dragenter', 'dragover'].forEach(eventName => dropzone.addEventListener(eventName, event => { event.preventDefault(); dropzone.style.background = '#14244a'; }));
     ['dragleave', 'drop'].forEach(eventName => dropzone.addEventListener(eventName, event => { event.preventDefault(); dropzone.style.background = ''; }));
     dropzone.addEventListener('drop', event => loadWbImage(event.dataTransfer.files[0]));
+    canvas.addEventListener('wheel', event => {
+      if (!wb.image) return;
+      event.preventDefault();
+      const factor = Math.exp(-event.deltaY * 0.0015);
+      setWbZoom(number(wb.zoom, 1) * factor, event);
+    }, { passive: false });
+    window.addEventListener('keydown', event => {
+      const activeElement = document.activeElement;
+      const editable = activeElement && ['INPUT', 'TEXTAREA', 'SELECT'].includes(activeElement.tagName);
+      if (event.code === 'Space' && wb.image && !editable && $('#wbModule').classList.contains('active-module')) {
+        wb.panKey = true;
+        canvas.style.cursor = 'grab';
+        event.preventDefault();
+      }
+    });
+    window.addEventListener('keyup', event => {
+      if (event.code !== 'Space') return;
+      wb.panKey = false;
+      if (!wb.panning) canvas.style.cursor = wb.guideEditing ? 'crosshair' : 'crosshair';
+    });
     canvas.addEventListener('pointerdown', event => {
       if (!wb.image) return;
       const point = canvasPoint(event);
+      if ((event.button === 1 || wb.panKey) && number(wb.zoom, 1) > 1.0001) {
+        event.preventDefault();
+        canvas.setPointerCapture(event.pointerId);
+        wb.panning = {
+          startClientX: event.clientX,
+          startClientY: event.clientY,
+          startBounds: wbEffectiveViewBounds(),
+          base: wbBaseViewBounds(),
+        };
+        canvas.style.cursor = 'grabbing';
+        return;
+      }
+      if (wb.guideEditing) {
+        canvas.setPointerCapture(event.pointerId);
+        const handle = wb.guide ? wbResizeHandleAt(point, wb.guide) : null;
+        const inside = wb.guide && point.x >= wb.guide.x && point.x <= wb.guide.x + wb.guide.width && point.y >= wb.guide.y && point.y <= wb.guide.y + wb.guide.height;
+        pushHistory(wb.guide ? '调整 WB 引导区' : '绘制 WB 引导区');
+        if (handle) {
+          wb.guideInteraction = { mode: 'resize', handle: handle.key, start: point, original: { ...wb.guide } };
+          canvas.style.cursor = handle.cursor;
+        } else if (inside) {
+          wb.guideInteraction = { mode: 'move', start: point, original: { ...wb.guide } };
+          canvas.style.cursor = 'move';
+        } else {
+          wb.guideInteraction = { mode: 'draw', start: point };
+          wb.guide = { x: point.x, y: point.y, width: 1, height: 1 };
+          canvas.style.cursor = 'crosshair';
+        }
+        drawWb();
+        return;
+      }
       const selected = wb.rois.find(roi => roi.id === wb.selectedId);
       const resizeHandle = !event.shiftKey ? wbResizeHandleAt(point, selected) : null;
       const hit = [...wb.rois].reverse().find(roi => point.x >= roi.x && point.x <= roi.x + roi.width && point.y >= roi.y && point.y <= roi.y + roi.height);
@@ -5249,6 +5699,30 @@
     });
     canvas.addEventListener('pointermove', event => {
       const point = canvasPoint(event);
+      if (wb.panning) {
+        const rect = wbViewport.getBoundingClientRect();
+        const dx = (event.clientX - wb.panning.startClientX) / Math.max(1, rect.width) * wb.panning.startBounds.width;
+        const dy = (event.clientY - wb.panning.startClientY) / Math.max(1, rect.height) * wb.panning.startBounds.height;
+        const base = wb.panning.base;
+        const width = wb.panning.startBounds.width;
+        const height = wb.panning.startBounds.height;
+        wb.panCenter = {
+          x: clamp(wb.panning.startBounds.x + width / 2 - dx, base.x + width / 2, base.x + base.width - width / 2),
+          y: clamp(wb.panning.startBounds.y + height / 2 - dy, base.y + height / 2, base.y + base.height - height / 2),
+        };
+        drawWb();
+        return;
+      }
+      if (wb.guideEditing && wb.guideInteraction) {
+        const interaction = wb.guideInteraction;
+        if (interaction.mode === 'draw') wb.guide = normalizedRect(interaction.start, point);
+        else if (interaction.mode === 'move') {
+          wb.guide.x = clamp(Math.round(interaction.original.x + point.x - interaction.start.x), 0, Math.max(0, canvas.width - wb.guide.width));
+          wb.guide.y = clamp(Math.round(interaction.original.y + point.y - interaction.start.y), 0, Math.max(0, canvas.height - wb.guide.height));
+        } else if (interaction.mode === 'resize') resizeWbGuide(interaction, point);
+        drawWb();
+        return;
+      }
       if (wb.resizing) {
         const roi = wb.rois.find(item => item.id === wb.resizing.id);
         if (!roi) return;
@@ -5270,12 +5744,33 @@
         drawWb();
         return;
       }
+      if (wb.guideEditing) {
+        const guideHandle = wb.guide ? wbResizeHandleAt(point, wb.guide) : null;
+        const insideGuide = wb.guide && point.x >= wb.guide.x && point.x <= wb.guide.x + wb.guide.width && point.y >= wb.guide.y && point.y <= wb.guide.y + wb.guide.height;
+        canvas.style.cursor = guideHandle?.cursor || (insideGuide ? 'move' : 'crosshair');
+        return;
+      }
       const selected = wb.rois.find(roi => roi.id === wb.selectedId);
       const resizeHandle = wbResizeHandleAt(point, selected);
       const hit = [...wb.rois].reverse().find(roi => point.x >= roi.x && point.x <= roi.x + roi.width && point.y >= roi.y && point.y <= roi.y + roi.height);
       canvas.style.cursor = resizeHandle?.cursor || (hit ? 'move' : 'crosshair');
     });
     const finishDrawing = event => {
+      if (wb.panning) {
+        wb.panning = null;
+        canvas.style.cursor = wb.panKey ? 'grab' : 'crosshair';
+        applyWbViewport();
+        return;
+      }
+      if (wb.guideInteraction) {
+        const interaction = wb.guideInteraction;
+        wb.guideInteraction = null;
+        if (wb.guide && (wb.guide.width < 5 || wb.guide.height < 5)) wb.guide = null;
+        updateWbGuideUi();
+        drawWb();
+        recordAudit('wb-guide-updated', { mode: interaction.mode, guide: wb.guide ? { ...wb.guide } : null });
+        return;
+      }
       if (wb.resizing) {
         const { id, handle } = wb.resizing;
         wb.resizing = null;
@@ -5298,9 +5793,9 @@
     };
     canvas.addEventListener('pointerup', finishDrawing);
     canvas.addEventListener('pointerleave', () => {
-      if (!wb.drawing && !wb.dragging && !wb.resizing) canvas.style.cursor = 'crosshair';
+      if (!wb.drawing && !wb.dragging && !wb.resizing && !wb.guideInteraction && !wb.panning) canvas.style.cursor = wb.panKey ? 'grab' : 'crosshair';
     });
-    canvas.addEventListener('pointercancel', () => { wb.drawing = null; wb.dragging = null; wb.resizing = null; wb.tempROI = null; canvas.style.cursor = 'crosshair'; drawWb(); });
+    canvas.addEventListener('pointercancel', () => { wb.drawing = null; wb.dragging = null; wb.resizing = null; wb.guideInteraction = null; wb.panning = null; wb.tempROI = null; canvas.style.cursor = 'crosshair'; drawWb(); });
     $('#wbDropzone').addEventListener('keydown', event => {
       if (!wb.selectedId) return;
       const step = event.shiftKey ? 10 : 1;
