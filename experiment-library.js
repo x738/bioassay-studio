@@ -730,7 +730,7 @@
         <div><b>v${record.version || 1}</b><small>${escapeHtml(dateText(record.updatedAt))}</small></div>
       </header>
       ${content}
-      <footer class="el-print-footer"><span>BioAssay Studio v${escapeHtml(document.documentElement.dataset.appVersion || '2.10.0')}</span><span>${index + 1} / ${total} · 打印预览生成于 ${escapeHtml(dateText(now()))}</span></footer>
+          <footer class="el-print-footer"><span>BioAssay Studio v${escapeHtml(document.documentElement.dataset.appVersion || '2.11.0')}</span><span>${index + 1} / ${total} · 打印预览生成于 ${escapeHtml(dateText(now()))}</span></footer>
     </article>`;
   }
 
@@ -1187,7 +1187,7 @@
     const summary = String(payload.summary || payload.sourceModule || '来自 BioAssay Studio 分析模块').trim();
     const record = await saveCalculation(type, payload.input || {}, payload.result || {}, label, summary);
     record.sourceModule = String(payload.sourceModule || '').trim();
-    record.appVersion = document.documentElement.dataset.appVersion || '2.10.0';
+    record.appVersion = document.documentElement.dataset.appVersion || '2.11.0';
     await dbPut('calculations', record);
     if (state.page === 'home' || state.page === 'calculator') renderShell();
     notice(`已接收“${label}”，可在智能计算器的计算历史中重新查看。`, 'good');

@@ -1,15 +1,16 @@
 <!doctype html>
-<html lang="zh-CN" data-app-version="2.10.0">
+<html lang="zh-CN" data-app-version="2.11.0">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="description" content="在浏览器本地完成 qPCR、Western blot、蛋白定量与实验配方知识库管理。" />
     <meta name="theme-color" content="#142342" />
     <meta name="referrer" content="no-referrer" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; base-uri 'self'; object-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' data:; worker-src 'self' blob:;" />
     <link rel="icon" href="icon.svg" type="image/svg+xml" />
     <link rel="manifest" href="manifest.webmanifest" />
     <title>BioAssay Studio | 科研数据与实验知识库</title>
-  <link rel="stylesheet" href="styles.css?v=2.10.0" />
+  <link rel="stylesheet" href="styles.css?v=2.11.0" />
   </head>
   <body>
     <header class="app-header">
@@ -77,6 +78,7 @@
             </div>
             <div class="wb-actions">
               <label id="openWbImage" class="button button-primary file-button direct-file-picker"><span>打开 WB 图片</span><input id="wbImageInput" type="file" accept=".png,.jpg,.jpeg,.tif,.tiff,.lsm,.bmp,image/png,image/jpeg,image/tiff,image/bmp" aria-label="从电脑选择 WB 图片" /></label>
+              <button id="saveWbToLibrary" class="button button-ghost">保存到知识库</button>
               <button id="exportWb" class="button button-ghost">导出 CSV</button>
               <button id="clearWb" class="button button-ghost danger">清空</button>
             </div>
@@ -208,19 +210,37 @@
             </section>
           </div>
           <details class="wb-batch-panel">
-            <summary><span><b>WB 批处理</b><small>连续读取多张图，自动识别、生成初筛表，再逐张打开人工复核</small></span><span class="pill info">BETA</span></summary>
+            <summary><span><b>WB 批处理与复核队列</b><small>逐图设置参数，自动初筛，人工确认后再统一导出</small></span><span class="pill info">REVIEW</span></summary>
             <div class="wb-batch-controls">
               <label class="button button-secondary file-button direct-file-picker"><span>选择多张 WB 图</span><input id="wbBatchInput" type="file" accept=".png,.jpg,.jpeg,.tif,.tiff,.lsm,.bmp,image/png,image/jpeg,image/tiff,image/bmp" multiple /></label>
+              <label>识别预设
+                <select id="wbBatchPreset">
+                  <option value="sds">常规 SDS-PAGE</option>
+                  <option value="diffuse">弱带 / 弥散条带</option>
+                  <option value="native">Native PAGE / 宽条带</option>
+                  <option value="strict">高对比 / 过曝</option>
+                </select>
+              </label>
+              <label>识别灵敏度<input id="wbBatchSensitivity" type="number" min="1" max="100" value="65" /></label>
               <label>预期泳道数<input id="wbBatchLaneCount" type="number" min="0" max="96" placeholder="0 = 自动" /></label>
               <label>每泳道条带数<input id="wbBatchBandsPerLane" type="number" min="0" max="8" value="0" /></label>
               <button id="runWbBatch" class="button button-primary" type="button">开始批量初筛</button>
+              <button id="stopWbBatch" class="button button-ghost" type="button" disabled>停止</button>
+              <button id="saveCurrentWbToBatch" class="button button-secondary" type="button" disabled>将当前 ROI 写回复核队列</button>
+              <button id="saveWbBatchToLibrary" class="button button-ghost" type="button" disabled>保存已确认结果到知识库</button>
+              <label>导出范围
+                <select id="wbBatchExportMode">
+                  <option value="confirmed">仅人工确认</option>
+                  <option value="all">全部已识别结果</option>
+                </select>
+              </label>
               <button id="exportWbBatch" class="button button-ghost" type="button" disabled>导出批处理 CSV</button>
             </div>
             <div id="wbBatchProgress" class="wb-batch-progress">尚未选择图片。批处理结果是候选初筛，不代替逐张人工确认。</div>
             <div class="table-wrap wb-batch-table-wrap">
               <table>
-                <thead><tr><th>文件</th><th>图像页</th><th>尺寸</th><th>候选条带</th><th>平均信号</th><th>QC / 提醒</th><th></th></tr></thead>
-                <tbody id="wbBatchBody"><tr class="empty-row"><td colspan="7">等待批处理图片。</td></tr></tbody>
+                <thead><tr><th>文件</th><th>图像页</th><th>尺寸</th><th>逐图参数</th><th>候选条带</th><th>平均信号</th><th>复核状态 / QC</th><th>操作</th></tr></thead>
+                <tbody id="wbBatchBody"><tr class="empty-row"><td colspan="8">等待批处理图片。</td></tr></tbody>
               </table>
             </div>
           </details>
@@ -406,6 +426,7 @@
             <label>重复方式
               <select id="coomassieReplicateMode">
                 <option value="1">无重复</option>
+                <option value="2">2 次重复</option>
                 <option value="3" selected>3 次重复</option>
               </select>
             </label>
@@ -417,6 +438,21 @@
             </label>
             <label class="checkbox-row coomassie-check"><input id="coomassieBlankSubtract" type="checkbox" checked />扣除 0 浓度空白</label>
             <label class="checkbox-row coomassie-check"><input id="coomassieForceOrigin" type="checkbox" />回归强制过原点（可选）</label>
+          </div>
+          <div class="coomassie-automation">
+            <div class="coomassie-automation-copy">
+              <span class="coomassie-step">A</span>
+              <div><h3>自动配置标准系列</h3><p>按 C₁V₁=C₂V₂ 联动计算标准液与稀释液；仍可关闭联动后逐格手改。</p></div>
+            </div>
+            <label>标准储备液（mg/mL）
+              <input id="coomassieStockConcentration" type="number" min="0.001" max="1000" step="0.001" value="1" />
+            </label>
+            <label class="coomassie-gradient-field">目标浓度系列（mg/mL，逗号分隔）
+              <input id="coomassieGradient" value="0, 0.1, 0.2, 0.4, 0.6, 0.8, 1.0" />
+            </label>
+            <label class="checkbox-row coomassie-check"><input id="coomassieAutoVolumes" type="checkbox" checked />浓度与体积自动联动</label>
+            <button id="generateCoomassieStandards" class="button button-primary" type="button">生成标准品体积</button>
+            <div id="coomassieAutosaveStatus" class="coomassie-autosave" role="status">本机草稿自动保存已开启</div>
           </div>
           <p class="coomassie-method-note">R² 仅作为实验质量建议，不阻止计算：≥0.990 建议合格；0.980–0.9899 建议复核；&lt;0.980 建议排查标准点或重做。强制过原点不是默认要求，应结合实验方案选择。</p>
 
@@ -442,8 +478,16 @@
 
           <div class="coomassie-curve-layout">
             <article class="coomassie-chart-card">
-              <div class="coomassie-card-title"><div><h3>标准曲线</h3><p id="coomassieEquation">填写至少 2 个有效标准点后自动拟合。</p></div><span id="coomassieFitBadge" class="fit-badge neutral">待计算</span></div>
-              <div class="coomassie-chart-wrap"><canvas id="coomassieChart" aria-label="考马斯亮蓝标准曲线"></canvas></div>
+              <div class="coomassie-card-title">
+                <div><h3>期刊风格标准曲线</h3><p id="coomassieEquation">填写至少 2 个有效标准点后自动拟合。</p></div>
+                <div class="coomassie-chart-actions">
+                  <span id="coomassieFitBadge" class="fit-badge neutral">待计算</span>
+                  <button id="exportCoomassiePng" class="button button-ghost button-small" type="button">600 DPI PNG</button>
+                  <button id="exportCoomassieSvg" class="button button-ghost button-small" type="button">SVG</button>
+                </div>
+              </div>
+              <div id="coomassieChart" class="coomassie-chart-wrap" role="img" aria-label="考马斯亮蓝标准曲线"></div>
+              <p class="coomassie-chart-note">均值以实心圆表示；重复测定显示 mean ± SD；黑色实线为纳入点的线性拟合。SVG 可继续在 Illustrator、Inkscape 或 PowerPoint 中编辑。</p>
             </article>
             <aside class="coomassie-qc-card">
               <h3>曲线质量建议</h3>
@@ -480,7 +524,10 @@
               <h3>计算公式与单位</h3>
               <p><b>测定液浓度</b> = (扣空白后的 A595 − 截距) ÷ 斜率；<b>原液浓度</b> = 测定液浓度 × 稀释倍数；<b>蛋白含量 (mg/g)</b> = 原液浓度 (mg/mL) × 提取总体积 (mL) ÷ 样品质量 (g)。</p>
             </div>
-            <button id="exportCoomassieCsv" class="button button-primary" type="button">导出标准曲线与样本 CSV</button>
+            <div class="actions-group">
+              <button id="saveCoomassieToLibrary" class="button button-secondary" type="button">保存到实验知识库</button>
+              <button id="exportCoomassieCsv" class="button button-primary" type="button">导出标准曲线与样本 CSV</button>
+            </div>
           </div>
         </section>
       </section>
@@ -501,7 +548,7 @@
     </main>
 
     <footer class="app-footer">
-      <div><strong>BioAssay Studio v2.10.0</strong><span>科研数据与实验知识库均在本机处理，网站不接收上传内容。</span></div>
+      <div><strong>BioAssay Studio v2.11.0</strong><span>科研数据与实验知识库均在本机处理，网站不接收上传内容。</span></div>
       <nav aria-label="网站信息"><a href="privacy.html">隐私与数据处理</a><a href="THIRD_PARTY_NOTICES.txt">第三方许可</a><a href="README.md">使用说明</a></nav>
     </footer>
 
@@ -524,8 +571,8 @@
     </dialog>
 
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
-    <script src="analysis-core.js?v=2.10.0"></script>
+  <script src="analysis-core.js?v=2.11.0"></script>
     <script src="vendor/chart.umd.js"></script>
-    <script src="app.js?v=2.10.0"></script>
+  <script src="app.js?v=2.11.0"></script>
   </body>
 </html>

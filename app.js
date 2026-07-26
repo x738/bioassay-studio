@@ -8,7 +8,7 @@
   const sheetDialog = $('#sheetDialog');
   const tiffPageDialog = $('#tiffPageDialog');
   const core = window.BioAssayCore;
-  const APP_VERSION = document.documentElement.dataset.appVersion || '2.10.0';
+  const APP_VERSION = document.documentElement.dataset.appVersion || '2.11.0';
   const auditLog = [];
   const history = { undo: [], redo: [], applying: false, max: 50 };
   const resourcePromises = new Map();
@@ -104,8 +104,10 @@
 
   const wbBatch = {
     running: false,
+    cancelRequested: false,
     entries: [],
     files: [],
+    activeIndex: -1,
   };
   let pendingTiffPageChoice = null;
 
@@ -136,6 +138,9 @@
     replicates: 3,
     blankSubtract: true,
     forceOrigin: false,
+    stockConcentration: 1,
+    gradientText: '0, 0.1, 0.2, 0.4, 0.6, 0.8, 1.0',
+    autoVolumes: true,
     aliquotVolume: 0.1,
     reagentVolume: 5,
     standards: [],
@@ -145,7 +150,11 @@
     fit: null,
     blankMean: 0,
     chart: null,
+    draftTimer: null,
+    lastAutosavedAt: '',
+    restoringDraft: false,
   };
+  const COOMASSIE_DRAFT_KEY = 'bioassay-studio-coomassie-draft-v2';
 
   const foldChangeErrorBars = {
     id: 'foldChangeErrorBars',
@@ -539,10 +548,36 @@
   }
 
   function exportIntegrityReport() {
+    const coomassieCalculation = coomassieCalculations();
     const report = {
       schema: 'bioassay-studio-integrity-report', version: APP_VERSION, generatedAt: new Date().toISOString(),
-      sources: { wb: wb.source, pairReference: pair.reference.source, pairTarget: pair.target.source, figure: figure.images.map(entry => entry.source || null) },
+      sources: {
+        wb: wb.source,
+        pairReference: pair.reference.source,
+        pairTarget: pair.target.source,
+        figure: figure.images.map(entry => entry.source || null),
+        wbBatch: wbBatch.entries.map(entry => entry.source || null),
+      },
       roiCounts: { wb: wb.rois.length, pairReference: pair.reference.rois.length, pairTarget: pair.target.rois.length },
+      analyses: {
+        coomassie: {
+          standards: coomassie.standards.length,
+          includedStandards: coomassieCalculation.includedCount,
+          samples: coomassie.samples.length,
+          fit: coomassie.fit,
+          blankMean: coomassie.blankMean,
+        },
+        wbBatch: wbBatch.entries.map(entry => ({
+          fileName: entry.fileName,
+          status: entry.status,
+          reviewStatus: entry.reviewStatus,
+          reviewedAt: entry.reviewedAt || '',
+          settings: entry.settings || {},
+          candidateCount: entry.candidates?.length || 0,
+          qcBad: entry.qcBad || 0,
+          stale: Boolean(entry.stale),
+        })),
+      },
       auditLog,
     };
     const clean = JSON.stringify(report, (key, value) => key === 'raw' ? undefined : value, 2);
@@ -741,7 +776,7 @@
       if (!Number.isFinite(number(qpcr.efficiencies[gene]))) qpcr.efficiencies[gene] = 100;
     });
     if (!qpcr.references.length && genes.length) {
-      qpcr.references = [genes.find(gene => /gapdh|actb|actin|18s|rplp0|ubq5/i.test(gene)) || genes[0]];
+      qpcr.references = [genes.find(gene => /gapdh|actb|actin|18s|rplp0|ubq|eef[-_ ]?1|ef[-_ ]?1|tubulin|tua|tub\b/i.test(gene)) || genes[0]];
     }
     if (!qpcr.controls.length && samples.length) {
       qpcr.controls = [samples.find(sample => /control|ctrl|vehicle|对照/i.test(sample)) || samples[0]];
@@ -1903,13 +1938,22 @@
     usefulRows.sort((a, b) => b.quality - a.quality);
     const automaticQualityFloor = usefulRows[0].quality * 0.84;
     if (!explicitRowLimit) {
-      // "0 = automatic" must be conservative: return the dominant physical
-      // band row instead of promoting a second aligned texture/ghost row. A
-      // user who really has two or more vertical bands per lane can request
-      // that row count explicitly. This prevents every one-row blot from being
-      // labelled B1/B2 merely because its background contains a weaker echo.
-      const row = usefulRows[0];
-      selected.push({ ...row, center: row.adjustedCenter });
+      // Automatic row count remains conservative, but a second row is accepted
+      // when it independently has similar quality and recurs at the same lane
+      // x-positions. This recovers true upper/lower rows such as 3.tif without
+      // promoting an unaligned membrane edge or faint one-row echo.
+      const primary = usefulRows[0];
+      selected.push({ ...primary, center: primary.adjustedCenter });
+      const companion = usefulRows.slice(1)
+        .filter(row => Math.abs(row.adjustedCenter - primary.adjustedCenter) >= minimumRowDistance)
+        .map(row => ({ row, alignment: rowAlignment(primary, row) }))
+        .filter(item => item.alignment >= 0.72
+          && item.row.quality >= primary.quality * 0.74
+          && item.row.boundaryPenalty >= 0.42
+          && Math.min(item.row.count, primary.count) / Math.max(item.row.count, primary.count) >= 0.72)
+        .sort((a, b) => (b.alignment * b.row.quality) - (a.alignment * a.row.quality))[0];
+      if (companion) selected.push({ ...companion.row, center: companion.row.adjustedCenter });
+      selected.sort((a, b) => a.center - b.center);
     } else if (desiredRows > 1) {
       // For multi-row blots, a very dark membrane edge can be stronger than a
       // genuine band row.  Select the mutually aligned row pair first: real
@@ -2923,33 +2967,95 @@
     const progress = $('#wbBatchProgress');
     const exportButton = $('#exportWbBatch');
     if (!body || !progress || !exportButton) return;
-    exportButton.disabled = !wbBatch.entries.some(entry => entry.status === 'done');
+    const exportMode = $('#wbBatchExportMode')?.value || 'confirmed';
+    const exportable = wbBatch.entries.filter(entry => entry.status === 'done' && !entry.stale && (exportMode === 'all' || entry.reviewStatus === 'confirmed'));
+    const confirmedEntries = wbBatch.entries.filter(entry => entry.status === 'done' && !entry.stale && entry.reviewStatus === 'confirmed');
+    exportButton.disabled = !exportable.length;
+    $('#saveWbBatchToLibrary').disabled = !confirmedEntries.length;
+    $('#stopWbBatch').disabled = !wbBatch.running;
+    $('#runWbBatch').disabled = wbBatch.running;
+    $('#saveCurrentWbToBatch').disabled = wbBatch.activeIndex < 0 || !wb.image;
     if (wbBatch.running) {
       const completed = wbBatch.entries.filter(entry => ['done', 'error'].includes(entry.status)).length;
       progress.textContent = `正在逐张处理：${completed}/${wbBatch.entries.length}。为避免浏览器卡顿，图片按顺序解码。`;
       progress.classList.add('running');
     } else {
       progress.classList.remove('running');
-      progress.textContent = wbBatch.files.length
-        ? `已选择 ${wbBatch.files.length} 张图片；批处理只生成候选初筛，点击“打开复核”可进入单图工作区调整 ROI。`
+      const confirmed = wbBatch.entries.filter(entry => entry.reviewStatus === 'confirmed').length;
+      const needsReview = wbBatch.entries.filter(entry => entry.status === 'done' && entry.reviewStatus !== 'confirmed').length;
+      progress.textContent = wbBatch.entries.length
+        ? `队列 ${wbBatch.entries.length} 张：${confirmed} 张已确认，${needsReview} 张待复核。${wbBatch.entries.some(entry => entry.file) ? '打开单图后可移动、缩放、删除或补画 ROI，再写回队列。' : '这是项目文件恢复的数值归档；重新复核需再次选择原图。'}`
         : '尚未选择图片。批处理结果是候选初筛，不代替逐张人工确认。';
     }
     body.innerHTML = wbBatch.entries.length ? wbBatch.entries.map((entry, index) => {
-      if (entry.status === 'pending') return `<tr><td>${escapeHtml(entry.fileName)}</td><td>—</td><td>—</td><td>等待</td><td>—</td><td>等待处理</td><td></td></tr>`;
-      if (entry.status === 'running') return `<tr><td>${escapeHtml(entry.fileName)}</td><td>—</td><td>—</td><td>处理中</td><td>—</td><td>正在解码与识别</td><td></td></tr>`;
-      if (entry.status === 'error') return `<tr><td>${escapeHtml(entry.fileName)}</td><td>—</td><td>—</td><td>失败</td><td>—</td><td class="batch-warning">${escapeHtml(entry.error)}</td><td><button type="button" data-wb-batch-open="${index}">手动打开</button></td></tr>`;
+      const settings = entry.settings || {};
+      const archived = !entry.file;
+      const parameters = `<div class="wb-batch-params">
+        <label>泳道<input data-wb-batch-setting="${index}" data-field="expectedLanes" type="number" min="0" max="96" value="${number(settings.expectedLanes, 0)}" ${archived ? 'disabled' : ''} /></label>
+        <label>条/泳道<input data-wb-batch-setting="${index}" data-field="bandsPerLane" type="number" min="0" max="8" value="${number(settings.bandsPerLane, 0)}" ${archived ? 'disabled' : ''} /></label>
+      </div>`;
+      const actions = `<div class="wb-batch-actions">
+        ${archived ? '<span class="wb-batch-status archived">数值归档</span>' : `<button type="button" data-wb-batch-rerun="${index}">按本行重跑</button>
+        ${entry.status === 'done' ? `<button type="button" data-wb-batch-open="${index}">打开复核</button>` : ''}`}
+        ${entry.status === 'done' ? `<button type="button" data-wb-batch-confirm="${index}" ${entry.stale || (entry.reviewStatus !== 'confirmed' && !entry.openedAt) ? `disabled title="${entry.stale ? '参数已修改，请先按本行重跑' : '请先打开图片复核候选框'}"` : ''}>${entry.reviewStatus === 'confirmed' ? '取消确认' : '标记确认'}</button>` : ''}
+        <button type="button" data-wb-batch-remove="${index}">移除</button>
+      </div>`;
+      if (entry.status === 'pending') return `<tr><td>${escapeHtml(entry.fileName)}</td><td>—</td><td>—</td><td>${parameters}</td><td>—</td><td>—</td><td>等待处理</td><td>${actions}</td></tr>`;
+      if (entry.status === 'running') return `<tr><td>${escapeHtml(entry.fileName)}</td><td>—</td><td>—</td><td>${parameters}</td><td>处理中</td><td>—</td><td>正在解码与识别</td><td>${actions}</td></tr>`;
+      if (entry.status === 'error') return `<tr><td>${escapeHtml(entry.fileName)}</td><td>—</td><td>—</td><td>${parameters}</td><td>失败</td><td>—</td><td class="batch-warning">${escapeHtml(entry.error)}</td><td>${actions}</td></tr>`;
       const page = Number(entry.source.pageCount) > 1 ? `${Number(entry.source.pageIndex || 0) + 1}/${entry.source.pageCount}` : '1/1';
-      const warning = entry.qcBad
+      const warning = entry.stale
+        ? '参数已修改，当前结果已过期；请按本行重跑'
+        : entry.qcBad
         ? `${entry.qcBad} 个候选需重点复核`
         : entry.source.warnings?.length
           ? entry.source.warnings.join('；')
           : '候选初筛通过';
-      return `<tr><td>${escapeHtml(entry.fileName)}</td><td>${page}</td><td>${entry.source.width} × ${entry.source.height}</td><td><b>${entry.candidates.length}</b></td><td>${fmt(entry.meanCorrected, 1)}</td><td class="${entry.qcBad || entry.source.warnings?.length ? 'batch-warning' : 'batch-good'}">${escapeHtml(warning)}</td><td><button type="button" data-wb-batch-open="${index}">打开复核</button></td></tr>`;
-    }).join('') : '<tr class="empty-row"><td colspan="7">等待批处理图片。</td></tr>';
-    $$('[data-wb-batch-open]', body).forEach(button => button.addEventListener('click', () => {
-      const entry = wbBatch.entries[Number(button.dataset.wbBatchOpen)];
-      if (entry?.file) loadWbImage(entry.file);
+      const review = entry.reviewStatus === 'confirmed'
+        ? '<span class="wb-batch-status confirmed">已人工确认</span>'
+        : '<span class="wb-batch-status review">待人工复核</span>';
+      return `<tr class="${wbBatch.activeIndex === index ? 'is-selected' : ''}"><td>${escapeHtml(entry.fileName)}</td><td>${page}</td><td>${entry.source.width} × ${entry.source.height}</td><td>${parameters}</td><td><b>${entry.candidates.length}</b></td><td>${fmt(entry.meanCorrected, 1)}</td><td class="${entry.qcBad || entry.source.warnings?.length ? 'batch-warning' : 'batch-good'}">${review}<br>${escapeHtml(warning)}</td><td>${actions}</td></tr>`;
+    }).join('') : '<tr class="empty-row"><td colspan="8">等待批处理图片。</td></tr>';
+    $$('[data-wb-batch-setting]', body).forEach(input => input.addEventListener('change', () => {
+      const entry = wbBatch.entries[Number(input.dataset.wbBatchSetting)];
+      if (!entry) return;
+      entry.settings = entry.settings || {};
+      entry.settings[input.dataset.field] = clamp(Math.round(number(input.value, 0)), 0, input.dataset.field === 'expectedLanes' ? 96 : 8);
+      input.value = entry.settings[input.dataset.field];
+      entry.reviewStatus = 'review';
+      entry.stale = true;
+      renderWbBatch();
     }));
+    $$('[data-wb-batch-open]', body).forEach(button => button.addEventListener('click', () => openWbBatchEntry(Number(button.dataset.wbBatchOpen))));
+    $$('[data-wb-batch-rerun]', body).forEach(button => button.addEventListener('click', () => rerunWbBatchEntry(Number(button.dataset.wbBatchRerun))));
+    $$('[data-wb-batch-confirm]', body).forEach(button => button.addEventListener('click', () => {
+      const entry = wbBatch.entries[Number(button.dataset.wbBatchConfirm)];
+      if (!entry || entry.status !== 'done') return;
+      entry.reviewStatus = entry.reviewStatus === 'confirmed' ? 'review' : 'confirmed';
+      renderWbBatch();
+    }));
+    $$('[data-wb-batch-remove]', body).forEach(button => button.addEventListener('click', () => {
+      const index = Number(button.dataset.wbBatchRemove);
+      wbBatch.entries.splice(index, 1);
+      wbBatch.files.splice(index, 1);
+      if (wbBatch.activeIndex === index) wbBatch.activeIndex = -1;
+      else if (wbBatch.activeIndex > index) wbBatch.activeIndex -= 1;
+      renderWbBatch();
+    }));
+  }
+
+  function wbBatchSettings(overrides = {}) {
+    const presetKey = overrides.presetKey || $('#wbBatchPreset')?.value || currentWbPreset().key;
+    return {
+      preset: WB_DETECTION_PRESETS[presetKey] || WB_DETECTION_PRESETS.sds,
+      presetKey,
+      sensitivity: clamp(number(overrides.sensitivity, number($('#wbBatchSensitivity')?.value, 65)), 1, 100),
+      expectedLanes: clamp(Math.round(number(overrides.expectedLanes, number($('#wbBatchLaneCount')?.value, 0))), 0, 96),
+      bandsPerLane: clamp(Math.round(number(overrides.bandsPerLane, number($('#wbBatchBandsPerLane')?.value, 0))), 0, 8),
+      minimumBandGap: clamp(Math.round(number(overrides.minimumBandGap, number($('#autoBandGap').value, 12))), 2, 160),
+      markerPercent: clamp(number(overrides.markerPercent, number($('#autoMarkerPercent').value, 0)), 0, 40),
+      edgePadding: clamp(number(overrides.edgePadding, number($('#autoEdgePadding').value, 4)), 0, 30),
+    };
   }
 
   function batchLocalBackground(source, imageCtx, roi, sourceWidth, sourceHeight) {
@@ -2966,8 +3072,8 @@
     return { ...stats, count: values.length };
   }
 
-  async function processWbBatchFile(file, settings) {
-    const { image, source } = await decodeSourceFile(file);
+  async function processWbBatchFile(file, settings, pageIndex = null) {
+    const { image, source } = await decodeSourceFile(file, Number.isInteger(pageIndex) ? { pageIndex } : {});
     const imageCtx = analysisContextForImage(image);
     const width = image.naturalWidth;
     const height = image.naturalHeight;
@@ -2985,7 +3091,12 @@
       null,
       settings.preset,
     );
-    const perLaneLimit = settings.bandsPerLane > 0 ? settings.bandsPerLane : 1;
+    // In automatic mode the detector may find two or more aligned band rows
+    // (for example the upper/lower rows in 3.tif). Do not collapse those rows
+    // back to one candidate per lane in the batch wrapper.
+    const perLaneLimit = settings.bandsPerLane > 0
+      ? settings.bandsPerLane
+      : Math.max(1, Math.round(number(detection.effectiveBandsPerLane, detection.rowGuideCount || 1)));
     const candidatesByLane = new Map();
     detection.candidates.sort((a, b) => b.score - a.score).forEach(candidate => {
       if (!candidatesByLane.has(candidate.laneIndex)) candidatesByLane.set(candidate.laneIndex, []);
@@ -3015,31 +3126,114 @@
       status: 'done',
       file,
       fileName: file.name,
+      settings: {
+        presetKey: settings.presetKey,
+        sensitivity: settings.sensitivity,
+        expectedLanes: settings.expectedLanes,
+        bandsPerLane: settings.bandsPerLane,
+        minimumBandGap: settings.minimumBandGap,
+        markerPercent: settings.markerPercent,
+        edgePadding: settings.edgePadding,
+      },
       source: sourceMetadata(source),
       candidates,
       measurements,
       meanCorrected: mean(measurements.map(row => row.corrected).filter(Number.isFinite)),
       qcBad: measurements.filter(row => row.quality.severity !== 'good').length,
+      reviewStatus: 'review',
+      stale: false,
     };
+  }
+
+  async function rerunWbBatchEntry(index) {
+    const entry = wbBatch.entries[index];
+    if (!entry?.file || wbBatch.running) return;
+    const settings = wbBatchSettings(entry.settings || {});
+    wbBatch.entries[index] = { ...entry, status: 'running', settings, reviewStatus: 'review' };
+    renderWbBatch();
+    try {
+      wbBatch.entries[index] = await processWbBatchFile(entry.file, settings, Number(entry.source?.pageIndex));
+    } catch (error) {
+      console.error(error);
+      wbBatch.entries[index] = { ...entry, status: 'error', error: error.message || '图片处理失败', settings };
+    }
+    renderWbBatch();
+  }
+
+  async function openWbBatchEntry(index) {
+    const entry = wbBatch.entries[index];
+    if (!entry?.file) return;
+    const loaded = await loadWbImage(entry.file, {
+      chooseTiffPage: false,
+      pageIndex: Number.isInteger(Number(entry.source?.pageIndex)) ? Number(entry.source.pageIndex) : undefined,
+    });
+    if (!loaded || entry.status !== 'done') return;
+    wb.rois = entry.candidates.map((candidate, candidateIndex) => ({
+      id: `roi-${wb.nextId++}`,
+      type: 'band',
+      name: `L${Number(candidate.laneIndex || 0) + 1}-B${Number(candidate.bandIndex || 0) + 1}`,
+      group: entry.fileName,
+      auto: true,
+      confidence: Math.round(clamp(number(candidate.score, 0.5) * 100, 1, 99)),
+      ...candidate,
+    }));
+    wb.backgroundMode = 'side';
+    $('#backgroundMode').value = 'side';
+    wb.selectedId = wb.rois[0]?.id || '';
+    wb.profileRoiId = wb.selectedId;
+    wbBatch.activeIndex = index;
+    entry.openedAt = new Date().toISOString();
+    updateWb();
+    renderWbBatch();
+    toastMessage(`已把 ${entry.candidates.length} 个候选 ROI 载入单图工作区；修正后点击“将当前 ROI 写回复核队列”。`);
+  }
+
+  function saveCurrentWbToBatch() {
+    const entry = wbBatch.entries[wbBatch.activeIndex];
+    if (!entry || !wb.image) return toastMessage('请先从批处理队列打开一张图片。');
+    const measurements = wbRowsWithMetrics()
+      .filter(row => row.type === 'band')
+      .sort((a, b) => (a.x + a.width / 2) - (b.x + b.width / 2) || a.y - b.y)
+      .map((row, index) => ({
+        ...row,
+        laneIndex: Number.isFinite(Number(row.laneIndex)) ? Number(row.laneIndex) : index,
+        bandIndex: Number.isFinite(Number(row.bandIndex)) ? Number(row.bandIndex) : 0,
+        background: row.backgroundIntensity,
+      }));
+    if (!measurements.length) return toastMessage('当前图没有条带 ROI；请先补画或恢复候选框。');
+    entry.status = 'done';
+    entry.source = sourceMetadata(wb.source);
+    entry.candidates = measurements.map(row => ({
+      x: row.x, y: row.y, width: row.width, height: row.height,
+      laneIndex: row.laneIndex, bandIndex: row.bandIndex, score: number(row.confidence, 50) / 100,
+    }));
+    entry.measurements = measurements;
+    entry.meanCorrected = mean(measurements.map(row => row.corrected).filter(Number.isFinite));
+    entry.qcBad = measurements.filter(row => row.quality?.severity !== 'good').length;
+    entry.reviewStatus = 'confirmed';
+    entry.stale = false;
+    entry.reviewedAt = new Date().toISOString();
+    renderWbBatch();
+    toastMessage(`已写回并确认 ${measurements.length} 个 ROI：${entry.fileName}`);
   }
 
   async function runWbBatch() {
     if (wbBatch.running) return;
     if (!wbBatch.files.length) return toastMessage('请先选择多张 WB 图片。');
-    const preset = currentWbPreset();
-    const settings = {
-      preset,
-      sensitivity: number($('#autoSensitivity').value, 65),
-      expectedLanes: clamp(Math.round(number($('#wbBatchLaneCount').value, 0)), 0, 96),
-      bandsPerLane: clamp(Math.round(number($('#wbBatchBandsPerLane').value, 0)), 0, 8),
-      minimumBandGap: clamp(Math.round(number($('#autoBandGap').value, 12)), 2, 160),
-      markerPercent: clamp(number($('#autoMarkerPercent').value, 0), 0, 40),
-      edgePadding: clamp(number($('#autoEdgePadding').value, 4), 0, 30),
-    };
+    const settings = wbBatchSettings();
     wbBatch.running = true;
-    wbBatch.entries = wbBatch.files.map(file => ({ status: 'pending', file, fileName: file.name }));
+    wbBatch.cancelRequested = false;
+    wbBatch.activeIndex = -1;
+    wbBatch.entries = wbBatch.files.map(file => ({
+      status: 'pending',
+      file,
+      fileName: file.name,
+      settings: { ...settings, preset: undefined },
+      reviewStatus: 'review',
+    }));
     renderWbBatch();
     for (let index = 0; index < wbBatch.files.length; index += 1) {
+      if (wbBatch.cancelRequested) break;
       wbBatch.entries[index].status = 'running';
       renderWbBatch();
       try {
@@ -3052,14 +3246,26 @@
       await new Promise(resolve => setTimeout(resolve, 0));
     }
     wbBatch.running = false;
+    const hashes = new Map();
+    wbBatch.entries.filter(entry => entry.status === 'done' && entry.source?.sha256).forEach(entry => {
+      if (!hashes.has(entry.source.sha256)) hashes.set(entry.source.sha256, []);
+      hashes.get(entry.source.sha256).push(entry);
+    });
+    [...hashes.values()].filter(group => group.length > 1).forEach(group => {
+      group.forEach(entry => {
+        entry.source.warnings = [...(entry.source.warnings || []), `疑似重复文件：${group.map(item => item.fileName).join('、')}`];
+      });
+    });
     renderWbBatch();
     const completed = wbBatch.entries.filter(entry => entry.status === 'done').length;
-    toastMessage(`WB 批处理完成：${completed}/${wbBatch.entries.length} 张成功。`);
-    recordAudit('wb-batch-completed', { total: wbBatch.entries.length, completed, preset: preset.key });
+    toastMessage(`${wbBatch.cancelRequested ? 'WB 批处理已停止' : 'WB 批处理完成'}：${completed}/${wbBatch.entries.length} 张成功。`);
+    recordAudit('wb-batch-completed', { total: wbBatch.entries.length, completed, preset: settings.presetKey, cancelled: wbBatch.cancelRequested });
   }
 
   function exportWbBatch() {
-    const rows = wbBatch.entries.filter(entry => entry.status === 'done').flatMap(entry => entry.measurements.map((measurement, index) => [
+    const exportMode = $('#wbBatchExportMode')?.value || 'confirmed';
+    const entries = wbBatch.entries.filter(entry => entry.status === 'done' && !entry.stale && (exportMode === 'all' || entry.reviewStatus === 'confirmed'));
+    const rows = entries.flatMap(entry => entry.measurements.map((measurement, index) => [
       entry.fileName,
       Number(entry.source.pageIndex || 0) + 1,
       entry.source.pageCount || 1,
@@ -3076,11 +3282,47 @@
       measurement.snr,
       measurement.saturationSeverity,
       measurement.quality?.text,
+      entry.reviewStatus === 'confirmed' ? 'Confirmed' : 'Unreviewed',
+      entry.reviewedAt || '',
+      entry.settings?.presetKey || '',
+      entry.settings?.expectedLanes || 0,
+      entry.settings?.bandsPerLane || 0,
     ]));
-    if (!rows.length) return toastMessage('当前没有可导出的批处理结果。');
-    const header = ['File', 'TIFF page', 'TIFF page count', 'Image width', 'Image height', 'Candidate', 'Lane', 'Band in lane', 'X', 'Y', 'Width', 'Height', 'Background corrected IntDen', 'SNR', 'Saturation', 'QC'];
+    if (!rows.length) return toastMessage(exportMode === 'confirmed' ? '尚无人工确认结果；请逐图复核并写回，或把导出范围改为“全部已识别结果”。' : '当前没有可导出的批处理结果。');
+    const header = ['File', 'TIFF page', 'TIFF page count', 'Image width', 'Image height', 'Candidate', 'Lane', 'Band in lane', 'X', 'Y', 'Width', 'Height', 'Background corrected IntDen', 'SNR', 'Saturation', 'QC', 'Review status', 'Reviewed at', 'Preset', 'Expected lanes', 'Bands per lane'];
     downloadText('western-blot-batch-screening.csv', [header, ...rows].map(row => row.map(csvCell).join(',')).join('\n'));
-    toastMessage('WB 批处理 CSV 已开始下载。');
+    toastMessage(`WB 批处理 CSV 已开始下载：${entries.length} 张图，${rows.length} 个条带。`);
+  }
+
+  function saveWbBatchToLibrary() {
+    const entries = wbBatch.entries.filter(entry => entry.status === 'done' && !entry.stale && entry.reviewStatus === 'confirmed');
+    if (!entries.length) return toastMessage('尚无人工确认的批处理结果。');
+    const bandCount = entries.reduce((sum, entry) => sum + (entry.measurements?.length || 0), 0);
+    return saveAnalysisToLibrary({
+      type: 'western-blot-batch-densitometry',
+      label: `WB 批处理 · ${new Date().toLocaleDateString('zh-CN')}`,
+      summary: `${entries.length} 张已确认图片 · ${bandCount} 个条带`,
+      input: {
+        files: entries.map(entry => ({
+          fileName: entry.fileName,
+          source: entry.source,
+          settings: entry.settings,
+          reviewedAt: entry.reviewedAt || '',
+        })),
+      },
+      result: {
+        entries: entries.map(entry => ({
+          fileName: entry.fileName,
+          source: entry.source,
+          settings: entry.settings,
+          measurements: entry.measurements,
+          meanCorrected: entry.meanCorrected,
+          qcBad: entry.qcBad,
+          reviewedAt: entry.reviewedAt || '',
+        })),
+      },
+      sourceModule: 'WB 批处理与复核队列',
+    });
   }
 
   function regionIntensityValues(source, imageCtx, rect, invert, stride = 1, exclude = null) {
@@ -3397,11 +3639,14 @@
     drawWbProfile(rows);
   }
 
-  async function loadWbImage(file) {
-    if (!file) return;
+  async function loadWbImage(file, options = {}) {
+    if (!file) return false;
     pushHistory('载入 WB 图像');
     try {
-      const { image, source } = await decodeSourceFile(file, { chooseTiffPage: true });
+      const { image, source } = await decodeSourceFile(file, {
+        chooseTiffPage: options.chooseTiffPage !== false,
+        pageIndex: options.pageIndex,
+      });
       wb.image = image;
       wb.source = source;
       wb.fileName = file.name;
@@ -3426,9 +3671,11 @@
       updateWb();
       recordAudit('wb-image-loaded', { fileName: file.name, sha256: source.sha256, width: source.width, height: source.height, bitDepth: source.bitDepth, format: source.format });
       toastMessage(`已载入图片：${file.name}（${source.width} × ${source.height}px，${source.bitDepth}-bit）`);
+      return true;
     } catch (error) {
       console.error(error);
       toastMessage(`图片读取失败：${error.message || '请尝试转换为 PNG 或 TIFF。'}`);
+      return false;
     }
   }
 
@@ -3518,6 +3765,31 @@
     if (!values.length) return toastMessage('请先载入 WB 图片并至少框选一个 ROI。');
     downloadText('western-blot-densitometry.csv', [header, ...values].map(row => row.map(csvCell).join(',')).join('\n'));
     toastMessage('WB 灰度结果 CSV 已开始下载。');
+  }
+
+  function saveWbResultsToLibrary() {
+    const rows = wbRowsWithMetrics();
+    const bands = rows.filter(row => row.type === 'band');
+    if (!wb.image || !bands.length) return toastMessage('请先载入 WB 图片并确认至少一个条带 ROI。');
+    const reference = rows.find(row => row.id === wb.referenceId);
+    return saveAnalysisToLibrary({
+      type: 'western-blot-densitometry',
+      label: `WB 灰度定量 · ${wb.fileName || new Date().toLocaleDateString('zh-CN')}`,
+      summary: `${bands.length} 个条带 · ${reference ? `参照 ${reference.name}` : '未设归一化参照'} · ${wb.backgroundMode}`,
+      input: {
+        source: sourceMetadata(wb.source),
+        backgroundMode: wb.backgroundMode,
+        invertIntensity: $('#invertIntensity').checked,
+        referenceId: wb.referenceId,
+        rois: cloneData(wb.rois),
+      },
+      result: {
+        rows: cloneData(rows),
+        bandCount: bands.length,
+        reference: reference ? { id: reference.id, name: reference.name, corrected: reference.corrected } : null,
+      },
+      sourceModule: 'Western blot 灰度分析',
+    });
   }
 
   function clearWb() {
@@ -5080,8 +5352,12 @@
     frame.style.position = 'fixed'; frame.style.right = '0'; frame.style.bottom = '0'; frame.style.width = '1px'; frame.style.height = '1px'; frame.style.border = '0';
     document.body.appendChild(frame);
     frame.contentDocument.open();
-    frame.contentDocument.write(`<html><head><title>Western blot figure</title><style>@page{size:auto;margin:10mm}body{margin:0}img{display:block;width:100%;height:auto}</style></head><body><img src="${dataUrl}" onload="setTimeout(()=>window.print(),100)"></body></html>`);
+    frame.contentDocument.write(`<html><head><title>Western blot figure</title><style>@page{size:auto;margin:10mm}body{margin:0}img{display:block;width:100%;height:auto}</style></head><body><img src="${dataUrl}"></body></html>`);
     frame.contentDocument.close();
+    const printImage = frame.contentDocument.querySelector('img');
+    const openPrintDialog = () => setTimeout(() => frame.contentWindow?.print(), 100);
+    if (printImage?.complete) openPrintDialog();
+    else printImage?.addEventListener('load', openPrintDialog, { once: true });
     setTimeout(() => { frame.remove(); renderWbFigure(); }, 30000);
     recordAudit('figure-print-requested');
     toastMessage('已打开系统打印窗口，可选择“另存为 PDF”。');
@@ -5092,6 +5368,7 @@
     const standardVolumes = [0, 0.01, 0.02, 0.04, 0.06, 0.08, 0.1];
     return concentrations.map((concentration, index) => ({
       id: `coomassie-standard-${coomassie.nextStandardId++}`,
+      included: true,
       concentration,
       standardVolume: standardVolumes[index],
       diluentVolume: Math.max(0, Number((0.1 - standardVolumes[index]).toFixed(3))),
@@ -5122,6 +5399,9 @@
       replicates: 3,
       blankSubtract: true,
       forceOrigin: false,
+      stockConcentration: 1,
+      gradientText: '0, 0.1, 0.2, 0.4, 0.6, 0.8, 1.0',
+      autoVolumes: true,
       aliquotVolume: 0.1,
       reagentVolume: 5,
       standards: [],
@@ -5134,6 +5414,9 @@
     coomassie.standards = coomassieStandardDefaults();
     coomassie.samples = [newCoomassieSample('样本 1')];
     $('#coomassieReplicateMode').value = '3';
+    $('#coomassieStockConcentration').value = '1';
+    $('#coomassieGradient').value = coomassie.gradientText;
+    $('#coomassieAutoVolumes').checked = true;
     $('#coomassieAliquotVolume').value = '0.1';
     $('#coomassieReagentVolume').value = '5';
     $('#coomassieBlankSubtract').checked = true;
@@ -5142,20 +5425,160 @@
     if (showToast) toastMessage('已恢复文档默认方案：7 个标准点、0.1 mL 加样、5 mL G-250、3 次重复。');
   }
 
+  function coomassieDraftPayload() {
+    return {
+      version: 2,
+      savedAt: new Date().toISOString(),
+      replicates: coomassie.replicates,
+      blankSubtract: coomassie.blankSubtract,
+      forceOrigin: coomassie.forceOrigin,
+      stockConcentration: coomassie.stockConcentration,
+      gradientText: coomassie.gradientText,
+      autoVolumes: coomassie.autoVolumes,
+      aliquotVolume: coomassie.aliquotVolume,
+      reagentVolume: coomassie.reagentVolume,
+      standards: coomassie.standards,
+      samples: coomassie.samples,
+      nextStandardId: coomassie.nextStandardId,
+      nextSampleId: coomassie.nextSampleId,
+    };
+  }
+
+  function scheduleCoomassieDraftSave() {
+    if (coomassie.restoringDraft) return;
+    clearTimeout(coomassie.draftTimer);
+    coomassie.draftTimer = setTimeout(() => {
+      try {
+        const payload = coomassieDraftPayload();
+        localStorage.setItem(COOMASSIE_DRAFT_KEY, JSON.stringify(payload));
+        coomassie.lastAutosavedAt = payload.savedAt;
+        const status = $('#coomassieAutosaveStatus');
+        if (status) status.textContent = `本机草稿已自动保存 · ${new Date(payload.savedAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`;
+      } catch (error) {
+        console.warn('考马斯草稿保存失败', error);
+        const status = $('#coomassieAutosaveStatus');
+        if (status) status.textContent = '本机草稿保存失败；建议立即导出 CSV 或项目文件。';
+      }
+    }, 280);
+  }
+
+  function restoreCoomassieDraft() {
+    try {
+      const raw = localStorage.getItem(COOMASSIE_DRAFT_KEY);
+      if (!raw) return false;
+      const draft = JSON.parse(raw);
+      if (!draft || !Array.isArray(draft.standards) || !Array.isArray(draft.samples)) return false;
+      coomassie.restoringDraft = true;
+      Object.assign(coomassie, {
+        replicates: clamp(Math.round(number(draft.replicates, 3)), 1, 3),
+        blankSubtract: draft.blankSubtract !== false,
+        forceOrigin: Boolean(draft.forceOrigin),
+        stockConcentration: Math.max(0.001, number(draft.stockConcentration, 1)),
+        gradientText: String(draft.gradientText || '0, 0.1, 0.2, 0.4, 0.6, 0.8, 1.0'),
+        autoVolumes: draft.autoVolumes !== false,
+        aliquotVolume: Math.max(0.001, number(draft.aliquotVolume, 0.1)),
+        reagentVolume: Math.max(0.01, number(draft.reagentVolume, 5)),
+        standards: draft.standards.map(row => ({ ...row, included: row.included !== false })),
+        samples: draft.samples,
+        nextStandardId: Math.max(1, number(draft.nextStandardId, draft.standards.length + 1)),
+        nextSampleId: Math.max(1, number(draft.nextSampleId, draft.samples.length + 1)),
+        lastAutosavedAt: draft.savedAt || '',
+      });
+      $('#coomassieReplicateMode').value = String(coomassie.replicates);
+      $('#coomassieStockConcentration').value = coomassie.stockConcentration;
+      $('#coomassieGradient').value = coomassie.gradientText;
+      $('#coomassieAutoVolumes').checked = coomassie.autoVolumes;
+      $('#coomassieAliquotVolume').value = coomassie.aliquotVolume;
+      $('#coomassieReagentVolume').value = coomassie.reagentVolume;
+      $('#coomassieBlankSubtract').checked = coomassie.blankSubtract;
+      $('#coomassieForceOrigin').checked = coomassie.forceOrigin;
+      coomassie.restoringDraft = false;
+      renderCoomassie();
+      const status = $('#coomassieAutosaveStatus');
+      if (status) status.textContent = draft.savedAt
+        ? `已恢复本机草稿 · ${new Date(draft.savedAt).toLocaleString('zh-CN')}`
+        : '已恢复本机草稿';
+      return true;
+    } catch (error) {
+      console.warn('考马斯草稿恢复失败', error);
+      coomassie.restoringDraft = false;
+      return false;
+    }
+  }
+
+  function coomassieConcentrationSeries() {
+    return String($('#coomassieGradient')?.value || coomassie.gradientText)
+      .split(/[\s,，;；]+/)
+      .map(value => number(value, NaN))
+      .filter(value => Number.isFinite(value) && value >= 0)
+      .filter((value, index, values) => values.indexOf(value) === index)
+      .sort((a, b) => a - b);
+  }
+
+  function coomassiePlanForConcentration(concentration) {
+    return core.standardDilutionPlan({
+      targetConcentration: concentration,
+      stockConcentration: coomassie.stockConcentration,
+      finalVolume: coomassie.aliquotVolume,
+    });
+  }
+
+  function generateCoomassieStandards() {
+    const concentrations = coomassieConcentrationSeries();
+    if (concentrations.length < 2) return toastMessage('请至少填写 2 个不同的非负目标浓度。');
+    const invalid = concentrations.find(value => !coomassiePlanForConcentration(value).valid);
+    if (invalid !== undefined) {
+      return toastMessage(`目标浓度 ${invalid} mg/mL 高于标准储备液 ${coomassie.stockConcentration} mg/mL；请提高储备液浓度或降低梯度。`);
+    }
+    const previousByConcentration = new Map(coomassie.standards.map(row => [number(row.concentration), row]));
+    coomassie.standards = concentrations.map(concentration => {
+      const plan = coomassiePlanForConcentration(concentration);
+      const previous = previousByConcentration.get(concentration);
+      return {
+        id: previous?.id || `coomassie-standard-${coomassie.nextStandardId++}`,
+        included: previous?.included !== false,
+        concentration,
+        standardVolume: Number(plan.stockVolume.toFixed(6)),
+        diluentVolume: Number(plan.diluentVolume.toFixed(6)),
+        reagentVolume: coomassie.reagentVolume,
+        absorbances: previous?.absorbances || ['', '', ''],
+      };
+    });
+    coomassie.gradientText = concentrations.join(', ');
+    $('#coomassieGradient').value = coomassie.gradientText;
+    renderCoomassie();
+    toastMessage(`已按 C₁V₁=C₂V₂ 生成 ${concentrations.length} 个标准点，并保留相同浓度已有的吸光度。`);
+  }
+
   function coomassieSummary(row) {
     return core.replicateSummary((row.absorbances || []).slice(0, coomassie.replicates));
   }
 
   function coomassieCalculations() {
-    const standardRows = coomassie.standards.map(row => ({ row, summary: coomassieSummary(row) }));
-    const blankRows = standardRows.filter(item => number(item.row.concentration) === 0 && item.summary.n);
+    const standardRows = coomassie.standards.map(row => ({ row, summary: coomassieSummary(row), included: row.included !== false }));
+    const blankRows = standardRows.filter(item => item.included && number(item.row.concentration) === 0 && item.summary.n);
     coomassie.blankMean = coomassie.blankSubtract && blankRows.length
       ? mean(blankRows.map(item => item.summary.mean))
       : 0;
     const points = standardRows
-      .filter(item => Number.isFinite(number(item.row.concentration)) && item.summary.n)
-      .map(item => ({ x: number(item.row.concentration), y: item.summary.mean - coomassie.blankMean }));
+      .filter(item => item.included && Number.isFinite(number(item.row.concentration)) && item.summary.n)
+      .map((item, index) => ({
+        x: number(item.row.concentration),
+        y: item.summary.mean - coomassie.blankMean,
+        sd: item.summary.sd,
+        n: item.summary.n,
+        id: item.row.id,
+        label: `标准点 ${index + 1}`,
+      }));
     coomassie.fit = core.linearRegression(points, { forceOrigin: coomassie.forceOrigin });
+    const residualById = new Map(points.map((point, index) => [
+      point.id,
+      point.y - number(coomassie.fit.predictions?.[index], NaN),
+    ]));
+    standardRows.forEach(item => {
+      item.adjustedMean = item.summary.mean - coomassie.blankMean;
+      item.residual = residualById.get(item.row.id);
+    });
     const xValues = points.map(point => point.x);
     const standardMin = xValues.length ? Math.min(...xValues) : NaN;
     const standardMax = xValues.length ? Math.max(...xValues) : NaN;
@@ -5171,7 +5594,15 @@
         sampleMass: row.sampleMass,
       }),
     }));
-    return { standardRows, points, sampleResults, standardMin, standardMax };
+    return {
+      standardRows,
+      points,
+      sampleResults,
+      standardMin,
+      standardMax,
+      includedCount: points.length,
+      excludedCount: standardRows.filter(item => !item.included).length,
+    };
   }
 
   function coomassieFitStatus(fit = coomassie.fit) {
@@ -5215,12 +5646,13 @@
   }
 
   function renderCoomassieStandards(calculations) {
-    $('#coomassieStandardHead').innerHTML = `<tr><th>标准点</th><th>浓度 (mg/mL)</th><th>标准液 (mL)</th><th>稀释液 (mL)</th><th>G-250 (mL)</th>${coomassieAbsorbanceHeaders()}<th>平均 A595</th><th>SD</th><th>CV</th><th>建议</th><th></th></tr>`;
+    $('#coomassieStandardHead').innerHTML = `<tr><th>纳入</th><th>标准点</th><th>浓度 (mg/mL)</th><th>标准液 (mL)</th><th>稀释液 (mL)</th><th>G-250 (mL)</th>${coomassieAbsorbanceHeaders()}<th>平均 A595</th><th>SD</th><th>CV</th><th>残差</th><th>建议</th><th></th></tr>`;
     $('#coomassieStandardBody').innerHTML = calculations.standardRows.map((item, index) => {
-      const { row, summary } = item;
+      const { row, summary, included, residual } = item;
       const qc = coomassieRepeatQc(summary);
       const absorbanceInputs = Array.from({ length: coomassie.replicates }, (_, replicateIndex) => `<td><input class="compact-input" data-coomassie-standard="${row.id}" data-field="absorbance" data-replicate="${replicateIndex}" type="number" step="0.001" min="0" value="${escapeHtml(row.absorbances?.[replicateIndex] ?? '')}" aria-label="标准点 ${index + 1} A595 重复 ${replicateIndex + 1}" /></td>`).join('');
-      return `<tr class="${qc.severity === 'bad' ? 'row-bad' : qc.severity === 'warn' ? 'row-warning' : ''}">
+      return `<tr class="${!included ? 'row-excluded' : qc.severity === 'bad' ? 'row-bad' : qc.severity === 'warn' ? 'row-warning' : ''}">
+        <td><input data-coomassie-standard="${row.id}" data-field="included" type="checkbox" ${included ? 'checked' : ''} aria-label="将标准点 ${index + 1} 纳入拟合" /></td>
         <td class="result-number">${index + 1}</td>
         <td><input class="compact-input" data-coomassie-standard="${row.id}" data-field="concentration" type="number" step="0.001" min="0" value="${escapeHtml(row.concentration)}" /></td>
         <td><input class="compact-input" data-coomassie-standard="${row.id}" data-field="standardVolume" type="number" step="0.001" min="0" value="${escapeHtml(row.standardVolume)}" /></td>
@@ -5229,6 +5661,7 @@
         ${absorbanceInputs}
         <td class="result-number">${fmt(summary.mean, 4)}</td><td class="result-number">${summary.n > 1 ? fmt(summary.sd, 4) : '—'}</td>
         <td class="result-number">${summary.n > 1 ? `${fmt(summary.cv, 1)}%` : '—'}</td>
+        <td class="result-number">${included ? fmt(residual, 4) : '排除'}</td>
         <td><span class="coomassie-qc ${qc.severity}">${escapeHtml(qc.text)}</span></td>
         <td><button class="coomassie-remove" data-remove-coomassie-standard="${row.id}" type="button" title="删除标准点">×</button></td>
       </tr>`;
@@ -5256,38 +5689,139 @@
     }).join('');
   }
 
-  function renderCoomassieChart(points, fit) {
-    const canvasElement = $('#coomassieChart');
-    if (!canvasElement || !window.Chart) return;
-    if (coomassie.chart) {
-      coomassie.chart.destroy();
-      coomassie.chart = null;
-    }
-    if (!fit || fit.n < 2 || !Number.isFinite(fit.slope)) return;
+  function coomassieNiceStep(range, targetTicks = 5) {
+    const rough = Math.max(Number.EPSILON, range / Math.max(2, targetTicks));
+    const power = 10 ** Math.floor(Math.log10(rough));
+    const fraction = rough / power;
+    const niceFraction = fraction <= 1 ? 1 : fraction <= 2 ? 2 : fraction <= 2.5 ? 2.5 : fraction <= 5 ? 5 : 10;
+    return niceFraction * power;
+  }
+
+  function coomassieAxis(points, fit) {
+    const xValues = points.map(point => point.x).filter(Number.isFinite);
+    const yValues = points.flatMap(point => [
+      point.y,
+      point.y + (Number.isFinite(point.sd) ? point.sd : 0),
+      point.y - (Number.isFinite(point.sd) ? point.sd : 0),
+    ]).filter(Number.isFinite);
+    const rawXMax = Math.max(0.01, ...xValues);
+    const rawYMax = Math.max(0.01, ...yValues, fit.slope * rawXMax + fit.intercept);
+    const minimumY = Math.min(0, ...yValues);
+    const rawYMin = minimumY < -Math.max(1e-9, rawYMax * 0.02) ? minimumY : 0;
+    const xStep = coomassieNiceStep(rawXMax, 5);
+    const yStep = coomassieNiceStep(rawYMax - rawYMin, 5);
+    const xMin = 0;
+    const xMax = Math.max(xStep, Math.ceil(rawXMax / xStep) * xStep);
+    const yMin = rawYMin < 0 ? Math.floor(rawYMin / yStep) * yStep : 0;
+    const yMax = Math.max(yStep, Math.ceil(rawYMax / yStep) * yStep);
+    return { xMin, xMax, xStep, yMin, yMax, yStep };
+  }
+
+  function coomassieTick(value, step) {
+    const digits = Math.max(0, Math.min(4, Math.ceil(-Math.log10(Math.max(step, Number.EPSILON))) + 1));
+    return Number(value.toFixed(digits)).toString();
+  }
+
+  function coomassieStandardCurveSvg(points, fit, {
+    width = 960,
+    height = 620,
+    widthMm = null,
+  } = {}) {
+    if (!fit || fit.n < 2 || !Number.isFinite(fit.slope) || !points.length) return '';
     const sorted = points.slice().sort((a, b) => a.x - b.x);
-    const xMin = Math.min(...sorted.map(point => point.x));
-    const xMax = Math.max(...sorted.map(point => point.x));
-    const line = [{ x: xMin, y: fit.slope * xMin + fit.intercept }, { x: xMax, y: fit.slope * xMax + fit.intercept }];
-    coomassie.chart = new Chart(canvasElement, {
-      type: 'scatter',
-      data: {
-        datasets: [
-          { label: '标准点', data: sorted, pointRadius: 5, pointHoverRadius: 7, backgroundColor: '#16868b', borderColor: '#16868b' },
-          { label: '线性拟合', type: 'line', data: line, pointRadius: 0, borderWidth: 2, borderColor: '#2f6fec', backgroundColor: '#2f6fec', tension: 0 },
-        ],
-      },
-      options: {
-        responsive: true,
-        maintainAspectRatio: false,
-        animation: false,
-        parsing: false,
-        plugins: { legend: { position: 'bottom' }, tooltip: { callbacks: { label: context => `${context.dataset.label}: (${fmt(context.parsed.x, 3)}, ${fmt(context.parsed.y, 4)})` } } },
-        scales: {
-          x: { title: { display: true, text: '蛋白浓度 (mg/mL)' }, beginAtZero: true, grid: { color: '#edf1f4' } },
-          y: { title: { display: true, text: coomassie.blankSubtract ? '扣空白 A595' : 'A595' }, beginAtZero: true, grid: { color: '#edf1f4' } },
-        },
-      },
+    const axis = coomassieAxis(sorted, fit);
+    const margin = { left: 112, right: 46, top: 56, bottom: 96 };
+    const plotWidth = width - margin.left - margin.right;
+    const plotHeight = height - margin.top - margin.bottom;
+    const x = value => margin.left + (value - axis.xMin) / Math.max(Number.EPSILON, axis.xMax - axis.xMin) * plotWidth;
+    const y = value => margin.top + (axis.yMax - value) / Math.max(Number.EPSILON, axis.yMax - axis.yMin) * plotHeight;
+    const parts = [
+      `<svg xmlns="http://www.w3.org/2000/svg" ${widthMm ? `width="${widthMm}mm" height="${(widthMm * height / width).toFixed(2)}mm"` : ''} viewBox="0 0 ${width} ${height}" role="img" aria-label="考马斯亮蓝蛋白标准曲线">`,
+      '<rect width="100%" height="100%" fill="#fff"/>',
+      '<g font-family="Times New Roman, Times, serif" fill="#000" stroke="#000">',
+    ];
+    for (let value = axis.xMin; value <= axis.xMax + axis.xStep * 0.25; value += axis.xStep) {
+      const px = x(value);
+      parts.push(`<line x1="${px}" y1="${margin.top + plotHeight}" x2="${px}" y2="${margin.top + plotHeight + 9}" stroke-width="1.6"/>`);
+      parts.push(`<text x="${px}" y="${margin.top + plotHeight + 36}" stroke="none" font-size="20" text-anchor="middle">${coomassieTick(value, axis.xStep)}</text>`);
+    }
+    for (let value = axis.yMin; value <= axis.yMax + axis.yStep * 0.25; value += axis.yStep) {
+      const py = y(value);
+      parts.push(`<line x1="${margin.left - 9}" y1="${py}" x2="${margin.left}" y2="${py}" stroke-width="1.6"/>`);
+      parts.push(`<text x="${margin.left - 18}" y="${py + 7}" stroke="none" font-size="20" text-anchor="end">${coomassieTick(value, axis.yStep)}</text>`);
+    }
+    parts.push(`<line x1="${margin.left}" y1="${margin.top}" x2="${margin.left}" y2="${margin.top + plotHeight}" stroke-width="2.2"/>`);
+    parts.push(`<line x1="${margin.left}" y1="${margin.top + plotHeight}" x2="${margin.left + plotWidth}" y2="${margin.top + plotHeight}" stroke-width="2.2"/>`);
+    const lineStartX = sorted[0].x;
+    const lineEndX = sorted[sorted.length - 1].x;
+    parts.push(`<line x1="${x(lineStartX)}" y1="${y(fit.slope * lineStartX + fit.intercept)}" x2="${x(lineEndX)}" y2="${y(fit.slope * lineEndX + fit.intercept)}" stroke-width="2.4"/>`);
+    sorted.forEach(point => {
+      const px = x(point.x);
+      const py = y(point.y);
+      if (point.n > 1 && Number.isFinite(point.sd) && point.sd > 0) {
+        const upper = y(point.y + point.sd);
+        const lower = y(point.y - point.sd);
+        parts.push(`<line x1="${px}" y1="${upper}" x2="${px}" y2="${lower}" stroke-width="1.7"/>`);
+        parts.push(`<line x1="${px - 8}" y1="${upper}" x2="${px + 8}" y2="${upper}" stroke-width="1.7"/>`);
+        parts.push(`<line x1="${px - 8}" y1="${lower}" x2="${px + 8}" y2="${lower}" stroke-width="1.7"/>`);
+      }
+      parts.push(`<circle cx="${px}" cy="${py}" r="6.5" stroke-width="1.5" fill="#000"/>`);
     });
+    const equationSign = fit.intercept >= 0 ? '+' : '−';
+    parts.push(`<text x="${margin.left + plotWidth - 8}" y="${margin.top + 28}" stroke="none" font-size="22" text-anchor="end"><tspan font-style="italic">y</tspan> = ${fmt(fit.slope, 4)}<tspan font-style="italic">x</tspan> ${equationSign} ${fmt(Math.abs(fit.intercept), 4)}</text>`);
+    parts.push(`<text x="${margin.left + plotWidth - 8}" y="${margin.top + 58}" stroke="none" font-size="22" text-anchor="end"><tspan font-style="italic">R</tspan>² = ${fmt(fit.r2, 4)}; <tspan font-style="italic">n</tspan> = ${fit.n}</text>`);
+    parts.push(`<text x="${margin.left + plotWidth / 2}" y="${height - 28}" stroke="none" font-size="25" font-weight="700" text-anchor="middle">Protein concentration (mg/mL)</text>`);
+    parts.push(`<text x="30" y="${margin.top + plotHeight / 2}" stroke="none" font-size="25" font-weight="700" text-anchor="middle" transform="rotate(-90 30 ${margin.top + plotHeight / 2})">${coomassie.blankSubtract ? 'Blank-corrected A595' : 'Absorbance at 595 nm'}</text>`);
+    parts.push('</g></svg>');
+    return parts.join('');
+  }
+
+  function renderCoomassieChart(points, fit) {
+    const mount = $('#coomassieChart');
+    if (!mount) return;
+    const svg = coomassieStandardCurveSvg(points, fit);
+    mount.innerHTML = svg || '<div class="empty-state">填写至少 2 个有效标准点后显示期刊风格曲线。</div>';
+  }
+
+  function exportCoomassieSvg() {
+    const calculations = coomassieCalculations();
+    const svg = coomassieStandardCurveSvg(calculations.points, coomassie.fit, { widthMm: 90 });
+    if (!svg) return toastMessage('标准曲线尚未形成，无法导出。');
+    downloadBlob('coomassie-standard-curve.svg', new Blob([svg], { type: 'image/svg+xml;charset=utf-8' }));
+    recordAudit('coomassie-curve-svg-exported', { points: coomassie.fit.n, r2: coomassie.fit.r2 });
+    toastMessage('标准曲线 SVG 已导出，可继续编辑。');
+  }
+
+  async function exportCoomassiePng() {
+    const calculations = coomassieCalculations();
+    const widthMm = 90;
+    const dpi = 600;
+    const width = core.pixelsForPhysicalWidth(widthMm, dpi);
+    const height = Math.round(width * 620 / 960);
+    const svg = coomassieStandardCurveSvg(calculations.points, coomassie.fit, { widthMm });
+    if (!svg) return toastMessage('标准曲线尚未形成，无法导出。');
+    const url = URL.createObjectURL(new Blob([svg], { type: 'image/svg+xml;charset=utf-8' }));
+    try {
+      const image = await imageFromSource(url);
+      const output = document.createElement('canvas');
+      output.width = width;
+      output.height = height;
+      const outputCtx = output.getContext('2d');
+      outputCtx.fillStyle = '#fff';
+      outputCtx.fillRect(0, 0, width, height);
+      outputCtx.drawImage(image, 0, 0, width, height);
+      const blob = await new Promise(resolve => output.toBlob(resolve, 'image/png'));
+      if (!blob) throw new Error('PNG 编码失败');
+      const stamped = core.setPngDpi(await blob.arrayBuffer(), dpi);
+      downloadBlob('coomassie-standard-curve-600dpi.png', new Blob([stamped], { type: 'image/png' }));
+      recordAudit('coomassie-curve-png-exported', { points: coomassie.fit.n, r2: coomassie.fit.r2, dpi, width, height });
+      toastMessage(`标准曲线已导出为 600 DPI PNG（${width} × ${height}px）。`);
+    } catch (error) {
+      console.error(error);
+      toastMessage(`标准曲线 PNG 导出失败：${error.message || '未知错误'}`);
+    } finally {
+      URL.revokeObjectURL(url);
+    }
   }
 
   function renderCoomassie() {
@@ -5299,7 +5833,7 @@
     const fitStatus = coomassieFitStatus(fit);
     $('#coomassieR2').textContent = fmt(fit?.r2, 4);
     $('#coomassieSlope').textContent = fmt(fit?.slope, 4);
-    $('#coomassiePointCount').textContent = String(fit?.n || 0);
+    $('#coomassiePointCount').textContent = `${calculations.includedCount}/${coomassie.standards.length}`;
     $('#coomassieBlank').textContent = fmt(coomassie.blankMean, 4);
     $('#coomassieFitBadge').textContent = fitStatus.badge;
     $('#coomassieFitBadge').className = `fit-badge ${fitStatus.severity}`;
@@ -5310,6 +5844,7 @@
       ? `A595 = ${fmt(fit.slope, 5)} × C ${sign} ${fmt(Math.abs(fit.intercept), 5)}；R² = ${fmt(fit.r2, 4)}${coomassie.blankSubtract ? '（已扣空白）' : ''}`
       : '填写至少 2 个有效标准点后自动拟合。';
     if ($('#coomassieModule').classList.contains('active-module')) setTimeout(() => renderCoomassieChart(calculations.points, fit), 0);
+    scheduleCoomassieDraftSave();
   }
 
   function parsePastedGrid(text) {
@@ -5346,6 +5881,7 @@
       if (![concentration, standardVolume, diluentVolume].every(Number.isFinite)) return null;
       return {
         id: `coomassie-standard-${coomassie.nextStandardId++}`,
+        included: true,
         concentration,
         standardVolume,
         diluentVolume,
@@ -5355,6 +5891,8 @@
     }).filter(Boolean);
     if (imported.length < 2) return toastMessage('未识别到足够的标准点；请按“浓度、标准液、稀释液、A595”列粘贴。');
     coomassie.standards = imported;
+    coomassie.gradientText = imported.map(row => row.concentration).sort((a, b) => a - b).join(', ');
+    $('#coomassieGradient').value = coomassie.gradientText;
     recordAudit('coomassie-standards-pasted', { rows: imported.length, replicates: coomassie.replicates });
     renderCoomassie();
     toastMessage(`已从表格导入 ${imported.length} 个标准点。`);
@@ -5404,12 +5942,15 @@
       ['是否扣空白', coomassie.blankSubtract ? '是' : '否'],
       ['空白A595', fmt(coomassie.blankMean, 6)],
       ['是否强制过原点', coomassie.forceOrigin ? '是' : '否'],
+      ['标准储备液(mg/mL)', coomassie.stockConcentration],
+      ['目标标准浓度系列(mg/mL)', coomassie.gradientText],
+      ['浓度体积自动联动', coomassie.autoVolumes ? '是' : '否'],
       [],
       ['标准品'],
-      ['标准点', '浓度(mg/mL)', '标准液(mL)', '稀释液(mL)', 'G-250(mL)', 'A595-1', 'A595-2', 'A595-3', '平均A595', 'SD', 'CV(%)', 'QC'],
-      ...calculations.standardRows.map(({ row, summary }, index) => {
+      ['标准点', '纳入拟合', '浓度(mg/mL)', '标准液(mL)', '稀释液(mL)', 'G-250(mL)', 'A595-1', 'A595-2', 'A595-3', '平均A595', 'SD', 'CV(%)', '残差', 'QC'],
+      ...calculations.standardRows.map(({ row, summary, residual, included }, index) => {
         const qc = coomassieRepeatQc(summary);
-        return [index + 1, row.concentration, row.standardVolume, row.diluentVolume, row.reagentVolume, ...(row.absorbances || []).slice(0, 3), fmt(summary.mean, 6), fmt(summary.sd, 6), fmt(summary.cv, 3), qc.text];
+        return [index + 1, included ? '是' : '否', row.concentration, row.standardVolume, row.diluentVolume, row.reagentVolume, ...(row.absorbances || []).slice(0, 3), fmt(summary.mean, 6), fmt(summary.sd, 6), fmt(summary.cv, 3), fmt(residual, 6), qc.text];
       }),
       [],
       ['样本结果'],
@@ -5424,19 +5965,79 @@
     toastMessage('考马斯亮蓝标准曲线与样本结果已开始导出。');
   }
 
+  function saveCoomassieToLibrary() {
+    const calculations = coomassieCalculations();
+    if (!coomassie.fit || coomassie.fit.n < 2 || !Number.isFinite(coomassie.fit.slope)) {
+      return toastMessage('请先形成有效标准曲线，再保存到实验知识库。');
+    }
+    return saveAnalysisToLibrary({
+      type: 'coomassie-protein-assay',
+      label: `考马斯亮蓝蛋白定量 · ${new Date().toLocaleDateString('zh-CN')}`,
+      summary: `${calculations.includedCount} 个标准点 · ${coomassie.samples.length} 个样本 · R² ${fmt(coomassie.fit.r2, 4)}`,
+      input: {
+        replicates: coomassie.replicates,
+        stockConcentration: coomassie.stockConcentration,
+        aliquotVolume: coomassie.aliquotVolume,
+        reagentVolume: coomassie.reagentVolume,
+        blankSubtract: coomassie.blankSubtract,
+        forceOrigin: coomassie.forceOrigin,
+        standards: cloneData(coomassie.standards),
+        samples: cloneData(coomassie.samples),
+      },
+      result: {
+        fit: cloneData(coomassie.fit),
+        blankMean: coomassie.blankMean,
+        standardRows: calculations.standardRows.map(item => ({
+          standard: cloneData(item.row),
+          summary: cloneData(item.summary),
+          residual: item.residual,
+          included: item.included,
+        })),
+        sampleResults: calculations.sampleResults.map(item => ({
+          sample: cloneData(item.row),
+          result: cloneData(item.result),
+          qc: coomassieSampleQc(item.result, calculations.standardMin, calculations.standardMax),
+        })),
+      },
+      sourceModule: '考马斯亮蓝蛋白浓度测定',
+    });
+  }
+
   function bindCoomassieEvents() {
     $('#resetCoomassie').addEventListener('click', () => resetCoomassie(true));
     $('#coomassieReplicateMode').addEventListener('change', event => {
-      coomassie.replicates = event.target.value === '1' ? 1 : 3;
+      coomassie.replicates = clamp(Math.round(number(event.target.value, 3)), 1, 3);
       renderCoomassie();
     });
+    $('#coomassieStockConcentration').addEventListener('change', event => {
+      coomassie.stockConcentration = Math.max(0.001, number(event.target.value, 1));
+      event.target.value = coomassie.stockConcentration;
+      if (coomassie.autoVolumes) generateCoomassieStandards();
+      else renderCoomassie();
+    });
+    $('#coomassieGradient').addEventListener('change', event => {
+      coomassie.gradientText = event.target.value.trim();
+      scheduleCoomassieDraftSave();
+    });
+    $('#coomassieAutoVolumes').addEventListener('change', event => {
+      coomassie.autoVolumes = event.target.checked;
+      if (coomassie.autoVolumes) generateCoomassieStandards();
+      else renderCoomassie();
+    });
+    $('#generateCoomassieStandards').addEventListener('click', generateCoomassieStandards);
     $('#coomassieAliquotVolume').addEventListener('change', event => {
       coomassie.aliquotVolume = Math.max(0.001, number(event.target.value, 0.1));
       event.target.value = coomassie.aliquotVolume;
+      coomassie.samples.forEach(row => { row.sampleVolume = coomassie.aliquotVolume; });
+      if (coomassie.autoVolumes) generateCoomassieStandards();
+      else renderCoomassie();
     });
     $('#coomassieReagentVolume').addEventListener('change', event => {
       coomassie.reagentVolume = Math.max(0.01, number(event.target.value, 5));
       event.target.value = coomassie.reagentVolume;
+      coomassie.standards.forEach(row => { row.reagentVolume = coomassie.reagentVolume; });
+      coomassie.samples.forEach(row => { row.reagentVolume = coomassie.reagentVolume; });
+      renderCoomassie();
     });
     $('#coomassieBlankSubtract').addEventListener('change', event => { coomassie.blankSubtract = event.target.checked; renderCoomassie(); });
     $('#coomassieForceOrigin').addEventListener('change', event => { coomassie.forceOrigin = event.target.checked; renderCoomassie(); });
@@ -5444,6 +6045,7 @@
       const lastConcentration = Math.max(0, ...coomassie.standards.map(row => number(row.concentration, 0)));
       coomassie.standards.push({
         id: `coomassie-standard-${coomassie.nextStandardId++}`,
+        included: true,
         concentration: Number((lastConcentration + 0.2).toFixed(3)),
         standardVolume: coomassie.aliquotVolume,
         diluentVolume: 0,
@@ -5460,15 +6062,39 @@
     $('#addCoomassieSample').addEventListener('click', () => { coomassie.samples.push(newCoomassieSample()); renderCoomassie(); });
     $('#importCoomassieStandards').addEventListener('click', importCoomassieStandards);
     $('#importCoomassieSamples').addEventListener('click', importCoomassieSamples);
+    $('#exportCoomassiePng').addEventListener('click', exportCoomassiePng);
+    $('#exportCoomassieSvg').addEventListener('click', exportCoomassieSvg);
+    $('#saveCoomassieToLibrary').addEventListener('click', saveCoomassieToLibrary);
     $('#exportCoomassieCsv').addEventListener('click', exportCoomassieCsv);
     $('#coomassieStandardBody').addEventListener('change', event => {
       const id = event.target.dataset.coomassieStandard;
       const row = coomassie.standards.find(item => item.id === id);
       if (!row) return;
-      if (event.target.dataset.field === 'absorbance') {
+      const field = event.target.dataset.field;
+      if (field === 'included') {
+        row.included = event.target.checked;
+      } else if (field === 'absorbance') {
         row.absorbances[Number(event.target.dataset.replicate)] = event.target.value;
-      } else if (event.target.dataset.field) {
-        row[event.target.dataset.field] = event.target.value === '' ? '' : number(event.target.value, 0);
+      } else if (field) {
+        row[field] = event.target.value === '' ? '' : number(event.target.value, 0);
+        if (coomassie.autoVolumes && field === 'concentration') {
+          const plan = coomassiePlanForConcentration(row.concentration);
+          if (plan.valid) {
+            row.standardVolume = Number(plan.stockVolume.toFixed(6));
+            row.diluentVolume = Number(plan.diluentVolume.toFixed(6));
+          } else {
+            toastMessage(plan.reason);
+          }
+        } else if (coomassie.autoVolumes && ['standardVolume', 'diluentVolume'].includes(field)) {
+          const standardVolume = field === 'diluentVolume'
+            ? Math.max(0, coomassie.aliquotVolume - number(row.diluentVolume, 0))
+            : clamp(number(row.standardVolume, 0), 0, coomassie.aliquotVolume);
+          row.standardVolume = Number(standardVolume.toFixed(6));
+          row.diluentVolume = Number(Math.max(0, coomassie.aliquotVolume - standardVolume).toFixed(6));
+          row.concentration = Number((coomassie.stockConcentration * standardVolume / coomassie.aliquotVolume).toFixed(6));
+          coomassie.gradientText = coomassie.standards.map(item => number(item.concentration, 0)).sort((a, b) => a - b).join(', ');
+          $('#coomassieGradient').value = coomassie.gradientText;
+        }
       }
       renderCoomassie();
     });
@@ -5508,6 +6134,7 @@
     'figureCropPadding', 'figureBackgroundStrength', 'figureWhiteBackground', 'figurePreserveColor', 'figureAutoDeskew', 'figureShowValues',
     'figureCompositionMode', 'figureValuePosition', 'figureLanePosition', 'figureProteinSide', 'figureMassSide', 'figurePanelGap', 'figureAutoFrame', 'figureFrameWidth', 'figureFrameHeight',
     'figureGroupLabels', 'figureTemplate', 'figureCustomWidthMm', 'figureDpi', 'figurePanelLetters',
+    'wbBatchPreset', 'wbBatchSensitivity', 'wbBatchLaneCount', 'wbBatchBandsPerLane', 'wbBatchExportMode',
   ];
 
   function captureProjectControls() {
@@ -5558,7 +6185,7 @@
   function saveProject() {
     const project = {
       schema: 'bioassay-studio-project',
-      version: 2,
+      version: 3,
       appVersion: APP_VERSION,
       createdAt: new Date().toISOString(),
       activeModule: $('.module-tab.active')?.dataset.module || 'qpcr',
@@ -5616,12 +6243,32 @@
         replicates: coomassie.replicates,
         blankSubtract: coomassie.blankSubtract,
         forceOrigin: coomassie.forceOrigin,
+        stockConcentration: coomassie.stockConcentration,
+        gradientText: coomassie.gradientText,
+        autoVolumes: coomassie.autoVolumes,
         aliquotVolume: coomassie.aliquotVolume,
         reagentVolume: coomassie.reagentVolume,
         standards: coomassie.standards,
         samples: coomassie.samples,
         nextStandardId: coomassie.nextStandardId,
         nextSampleId: coomassie.nextSampleId,
+      },
+      wbBatch: {
+        entries: wbBatch.entries.map(entry => ({
+          status: entry.status === 'done' ? 'done' : entry.status === 'error' ? 'error' : 'pending',
+          fileName: entry.fileName,
+          settings: cloneData(entry.settings || {}),
+          source: entry.source ? sourceMetadata(entry.source) : null,
+          candidates: cloneData(entry.candidates || []),
+          measurements: cloneData(entry.measurements || []),
+          meanCorrected: entry.meanCorrected,
+          qcBad: entry.qcBad || 0,
+          reviewStatus: entry.reviewStatus || 'review',
+          openedAt: entry.openedAt || '',
+          reviewedAt: entry.reviewedAt || '',
+          stale: Boolean(entry.stale),
+          error: entry.error || '',
+        })),
       },
     };
     const timestamp = project.createdAt.slice(0, 19).replaceAll(':', '-');
@@ -5640,7 +6287,7 @@
     try {
       const raw = (await file.text()).replace(/^\uFEFF/, '');
       const project = JSON.parse(raw);
-      if (project?.schema !== 'bioassay-studio-project' || ![1, 2].includes(project.version)) throw new Error('unsupported project');
+      if (project?.schema !== 'bioassay-studio-project' || ![1, 2, 3].includes(project.version)) throw new Error('unsupported project');
       if (qpcr.chart) qpcr.chart.destroy();
       const savedQpcr = project.qpcr || {};
       Object.assign(qpcr, {
@@ -5664,24 +6311,53 @@
         coomassie.chart.destroy();
         coomassie.chart = null;
       }
-      coomassie.replicates = savedCoomassie.replicates === 1 ? 1 : 3;
+      coomassie.replicates = clamp(Math.round(number(savedCoomassie.replicates, 3)), 1, 3);
       coomassie.blankSubtract = savedCoomassie.blankSubtract !== false;
       coomassie.forceOrigin = Boolean(savedCoomassie.forceOrigin);
+      coomassie.stockConcentration = Math.max(0.001, number(savedCoomassie.stockConcentration, 1));
+      coomassie.gradientText = String(savedCoomassie.gradientText || '0, 0.1, 0.2, 0.4, 0.6, 0.8, 1.0');
+      coomassie.autoVolumes = savedCoomassie.autoVolumes !== false;
       coomassie.aliquotVolume = Math.max(0.001, number(savedCoomassie.aliquotVolume, 0.1));
       coomassie.reagentVolume = Math.max(0.01, number(savedCoomassie.reagentVolume, 5));
       coomassie.nextStandardId = Math.max(1, Math.round(number(savedCoomassie.nextStandardId, 1)));
       coomassie.nextSampleId = Math.max(1, Math.round(number(savedCoomassie.nextSampleId, 1)));
       coomassie.standards = Array.isArray(savedCoomassie.standards) && savedCoomassie.standards.length >= 2
-        ? savedCoomassie.standards.map(row => ({ ...row, absorbances: Array.isArray(row.absorbances) ? [...row.absorbances, '', '', ''].slice(0, 3) : ['', '', ''] }))
+        ? savedCoomassie.standards.map(row => ({ ...row, included: row.included !== false, absorbances: Array.isArray(row.absorbances) ? [...row.absorbances, '', '', ''].slice(0, 3) : ['', '', ''] }))
         : coomassieStandardDefaults();
       coomassie.samples = Array.isArray(savedCoomassie.samples) && savedCoomassie.samples.length
         ? savedCoomassie.samples.map(row => ({ ...row, absorbances: Array.isArray(row.absorbances) ? [...row.absorbances, '', '', ''].slice(0, 3) : ['', '', ''] }))
         : [newCoomassieSample('样本 1')];
       $('#coomassieReplicateMode').value = String(coomassie.replicates);
+      $('#coomassieStockConcentration').value = coomassie.stockConcentration;
+      $('#coomassieGradient').value = coomassie.gradientText;
+      $('#coomassieAutoVolumes').checked = coomassie.autoVolumes;
       $('#coomassieAliquotVolume').value = coomassie.aliquotVolume;
       $('#coomassieReagentVolume').value = coomassie.reagentVolume;
       $('#coomassieBlankSubtract').checked = coomassie.blankSubtract;
       $('#coomassieForceOrigin').checked = coomassie.forceOrigin;
+
+      const savedBatch = project.wbBatch || {};
+      wbBatch.running = false;
+      wbBatch.cancelRequested = false;
+      wbBatch.activeIndex = -1;
+      wbBatch.files = [];
+      wbBatch.entries = Array.isArray(savedBatch.entries) ? savedBatch.entries.map(entry => ({
+        status: entry.status === 'done' ? 'done' : entry.status === 'error' ? 'error' : 'pending',
+        file: null,
+        fileName: String(entry.fileName || '已恢复 WB 结果'),
+        settings: entry.settings && typeof entry.settings === 'object' ? { ...entry.settings } : {},
+        source: entry.source && typeof entry.source === 'object' ? { ...entry.source } : null,
+        candidates: Array.isArray(entry.candidates) ? entry.candidates : [],
+        measurements: Array.isArray(entry.measurements) ? entry.measurements : [],
+        meanCorrected: number(entry.meanCorrected),
+        qcBad: Math.max(0, Math.round(number(entry.qcBad, 0))),
+        reviewStatus: entry.reviewStatus === 'confirmed' ? 'confirmed' : 'review',
+        openedAt: entry.openedAt || '',
+        reviewedAt: entry.reviewedAt || '',
+        stale: Boolean(entry.stale),
+        error: entry.error || '',
+        archived: true,
+      })) : [];
 
       const savedWb = project.wb || {};
       wb.image = await imageFromSource(savedWb.imageSource);
@@ -5770,8 +6446,9 @@
       renderPairResults();
       renderFigurePanelInputs();
       renderCoomassie();
+      renderWbBatch();
       if (figure.images.length) renderWbFigure(); else drawFigureEmptyState();
-      const activeModule = ['qpcr', 'wb', 'coomassie'].includes(project.activeModule) ? project.activeModule : 'qpcr';
+      const activeModule = ['qpcr', 'wb', 'coomassie', 'experiment'].includes(project.activeModule) ? project.activeModule : 'qpcr';
       const moduleButton = $(`.module-tab[data-module="${activeModule}"]`);
       moduleButton?.click();
       const wbMode = ['single', 'pair', 'figure'].includes(project.activeWbMode) ? project.activeWbMode : 'single';
@@ -5804,7 +6481,10 @@
         } catch (error) {
           console.error(error);
           const mount = $('#experimentLibraryMount');
-          if (mount) mount.innerHTML = `<div class="module-load-error"><h3>实验知识库加载失败</h3><p>${escapeHtml(error.message)}</p><button type="button" onclick="location.reload()">重新载入</button></div>`;
+          if (mount) {
+            mount.innerHTML = `<div class="module-load-error"><h3>实验知识库加载失败</h3><p>${escapeHtml(error.message)}</p><button type="button" data-reload-experiment-library>重新载入</button></div>`;
+            mount.querySelector('[data-reload-experiment-library]')?.addEventListener('click', () => location.reload());
+          }
           toastMessage('实验知识库加载失败，请刷新后重试。');
         }
       }
@@ -5854,9 +6534,17 @@
     $('#wbBatchInput').addEventListener('change', event => {
       wbBatch.files = [...event.target.files].filter(Boolean);
       wbBatch.entries = [];
+      wbBatch.activeIndex = -1;
       renderWbBatch();
     });
     $('#runWbBatch').addEventListener('click', runWbBatch);
+    $('#stopWbBatch').addEventListener('click', () => {
+      wbBatch.cancelRequested = true;
+      $('#wbBatchProgress').textContent = '正在安全停止：当前图片完成后不再处理后续文件。';
+    });
+    $('#saveCurrentWbToBatch').addEventListener('click', saveCurrentWbToBatch);
+    $('#wbBatchExportMode').addEventListener('change', renderWbBatch);
+    $('#saveWbBatchToLibrary').addEventListener('click', saveWbBatchToLibrary);
     $('#exportWbBatch').addEventListener('click', exportWbBatch);
     $('#roiType').addEventListener('change', event => { $('#roiName').value = event.target.value === 'background' ? '背景' : `条带 ${wb.nextId}`; });
     $('#invertIntensity').addEventListener('change', updateWb);
@@ -5921,6 +6609,7 @@
     $('#duplicateSelectedRoi').addEventListener('click', duplicateSelectedWbRoi);
     $('#equalizeBandRois').addEventListener('click', equalizeBandRois);
     $('#deleteSelectedRoi').addEventListener('click', deleteSelectedWbRoi);
+    $('#saveWbToLibrary').addEventListener('click', saveWbResultsToLibrary);
     $('#exportWb').addEventListener('click', exportWb);
     $('#clearWb').addEventListener('click', clearWb);
     const dropzone = $('#wbDropzone');
@@ -6238,7 +6927,7 @@
 
   bindGlobalEvents();
   initDesktopUpdate();
-  resetCoomassie(false);
+  if (!restoreCoomassieDraft()) resetCoomassie(false);
   renderQpcr();
   updateWb();
   renderWbBatch();
