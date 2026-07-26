@@ -1,5 +1,5 @@
 BioAssay Studio - Third-Party Notices
-Version 2.9.0
+Version 2.10.0
 
 This distribution includes the following locally vendored open-source libraries:
 
@@ -22,7 +22,13 @@ This distribution includes the following locally vendored open-source libraries:
    Source: https://github.com/photopea/UTIF.js
    The full license text is distributed at vendor/UTIF-LICENSE.txt.
 
-4. Tesseract.js 6.0.1 and tesseract.js-core
+4. pako 1.0.11 inflate build
+   Copyright (c) 2014-2017 Vitaly Puzrin and Andrei Tuputcyn
+   License: MIT and zlib
+   Source: https://github.com/nodeca/pako
+   The full license text is distributed at vendor/PAKO-LICENSE.txt.
+
+5. Tesseract.js 6.0.1 and tesseract.js-core
    Copyright (c) Tesseract.js contributors
    License: Apache License 2.0
    Source: https://github.com/naptha/tesseract.js
@@ -30,7 +36,7 @@ This distribution includes the following locally vendored open-source libraries:
    vendor/tesseract/TESSERACT-JS-LICENSE.txt and
    vendor/tesseract/TESSERACT-CORE-LICENSE.txt.
 
-5. Tesseract simplified Chinese and English trained data
+6. Tesseract simplified Chinese and English trained data
    Packages: @tesseract.js-data/chi_sim and @tesseract.js-data/eng
    License: Apache License 2.0
    Source: https://github.com/naptha/tessdata

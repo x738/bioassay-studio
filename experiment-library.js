@@ -64,6 +64,7 @@
       includeAttachments: true,
     },
   };
+  let initializationPromise = null;
 
   function uid(prefix = 'item') {
     if (globalThis.crypto?.randomUUID) return `${prefix}-${globalThis.crypto.randomUUID()}`;
@@ -729,7 +730,7 @@
         <div><b>v${record.version || 1}</b><small>${escapeHtml(dateText(record.updatedAt))}</small></div>
       </header>
       ${content}
-      <footer class="el-print-footer"><span>BioAssay Studio v${escapeHtml(document.documentElement.dataset.appVersion || '2.9.0')}</span><span>${index + 1} / ${total} · 打印预览生成于 ${escapeHtml(dateText(now()))}</span></footer>
+      <footer class="el-print-footer"><span>BioAssay Studio v${escapeHtml(document.documentElement.dataset.appVersion || '2.10.0')}</span><span>${index + 1} / ${total} · 打印预览生成于 ${escapeHtml(dateText(now()))}</span></footer>
     </article>`;
   }
 
@@ -1176,6 +1177,21 @@
     await dbPut('calculations', record);
     state.records.calculations.unshift(record);
     return record;
+  }
+
+  async function importExternalCalculation(payload = {}) {
+    if (initializationPromise) await initializationPromise;
+    if (!state.db) throw new Error('实验知识库尚未初始化');
+    const type = String(payload.type || 'external-analysis').trim();
+    const label = String(payload.label || '外部分析结果').trim();
+    const summary = String(payload.summary || payload.sourceModule || '来自 BioAssay Studio 分析模块').trim();
+    const record = await saveCalculation(type, payload.input || {}, payload.result || {}, label, summary);
+    record.sourceModule = String(payload.sourceModule || '').trim();
+    record.appVersion = document.documentElement.dataset.appVersion || '2.10.0';
+    await dbPut('calculations', record);
+    if (state.page === 'home' || state.page === 'calculator') renderShell();
+    notice(`已接收“${label}”，可在智能计算器的计算历史中重新查看。`, 'good');
+    return clone(record);
   }
 
   async function recalculateRecipe(resetSteps = true) {
@@ -1991,6 +2007,9 @@
     if (document.visibilityState === 'hidden') flushPendingSaves();
   });
 
+  window.ExperimentLibraryApi = {
+    importCalculation: importExternalCalculation,
+  };
   window.ExperimentLibraryReady = true;
-  init();
+  initializationPromise = init();
 })();

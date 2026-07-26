@@ -1,0 +1,36 @@
+name: BioAssay Studio CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  core-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Syntax checks
+        run: |
+          node --check app.js
+          node --check experiment-library.js
+          node --check analysis-core.js
+          node --check experiment-core.js
+
+      - name: Core and offline integration tests
+        run: |
+          node qa/test_analysis_core.js
+          node qa/test_experiment_core.js
+          node qa/test_experiment_library_assets.js

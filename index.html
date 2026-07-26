@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="zh-CN" data-app-version="2.9.0">
+<html lang="zh-CN" data-app-version="2.10.0">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -9,7 +9,7 @@
     <link rel="icon" href="icon.svg" type="image/svg+xml" />
     <link rel="manifest" href="manifest.webmanifest" />
     <title>BioAssay Studio | 科研数据与实验知识库</title>
-  <link rel="stylesheet" href="styles.css?v=2.9.0" />
+  <link rel="stylesheet" href="styles.css?v=2.10.0" />
   </head>
   <body>
     <header class="app-header">
@@ -76,7 +76,7 @@
               <div id="wbSourceMeta" class="source-integrity">尚未载入原始图像</div>
             </div>
             <div class="wb-actions">
-              <label id="openWbImage" class="button button-primary file-button direct-file-picker"><span>打开 WB 图片</span><input id="wbImageInput" type="file" accept=".png,.jpg,.jpeg,.tif,.tiff,.bmp,image/png,image/jpeg,image/tiff,image/bmp" aria-label="从电脑选择 WB 图片" /></label>
+              <label id="openWbImage" class="button button-primary file-button direct-file-picker"><span>打开 WB 图片</span><input id="wbImageInput" type="file" accept=".png,.jpg,.jpeg,.tif,.tiff,.lsm,.bmp,image/png,image/jpeg,image/tiff,image/bmp" aria-label="从电脑选择 WB 图片" /></label>
               <button id="exportWb" class="button button-ghost">导出 CSV</button>
               <button id="clearWb" class="button button-ghost danger">清空</button>
             </div>
@@ -207,6 +207,23 @@
               <div id="wbProfileSummary" class="wb-profile-summary">载入图片并选择条带后显示曲线。</div>
             </section>
           </div>
+          <details class="wb-batch-panel">
+            <summary><span><b>WB 批处理</b><small>连续读取多张图，自动识别、生成初筛表，再逐张打开人工复核</small></span><span class="pill info">BETA</span></summary>
+            <div class="wb-batch-controls">
+              <label class="button button-secondary file-button direct-file-picker"><span>选择多张 WB 图</span><input id="wbBatchInput" type="file" accept=".png,.jpg,.jpeg,.tif,.tiff,.lsm,.bmp,image/png,image/jpeg,image/tiff,image/bmp" multiple /></label>
+              <label>预期泳道数<input id="wbBatchLaneCount" type="number" min="0" max="96" placeholder="0 = 自动" /></label>
+              <label>每泳道条带数<input id="wbBatchBandsPerLane" type="number" min="0" max="8" value="0" /></label>
+              <button id="runWbBatch" class="button button-primary" type="button">开始批量初筛</button>
+              <button id="exportWbBatch" class="button button-ghost" type="button" disabled>导出批处理 CSV</button>
+            </div>
+            <div id="wbBatchProgress" class="wb-batch-progress">尚未选择图片。批处理结果是候选初筛，不代替逐张人工确认。</div>
+            <div class="table-wrap wb-batch-table-wrap">
+              <table>
+                <thead><tr><th>文件</th><th>图像页</th><th>尺寸</th><th>候选条带</th><th>平均信号</th><th>QC / 提醒</th><th></th></tr></thead>
+                <tbody id="wbBatchBody"><tr class="empty-row"><td colspan="7">等待批处理图片。</td></tr></tbody>
+              </table>
+            </div>
+          </details>
         </div>
         </div>
 
@@ -219,6 +236,7 @@
             </div>
             <div class="pair-actions">
               <label class="checkbox-row pair-checkbox"><input id="pairAutoBackground" type="checkbox" checked />自动局部背景扣除</label>
+              <button id="savePairToLibrary" class="button button-ghost" type="button">保存结果到知识库</button>
               <button id="exportPairWb" class="button button-secondary" type="button">导出双图 CSV</button>
               <button id="clearPairWb" class="button button-ghost danger" type="button">清空双图</button>
             </div>
@@ -226,13 +244,13 @@
 
           <div class="pair-layout">
             <section class="pair-pane" data-pair-pane="reference">
-              <div class="pair-pane-header"><div><span class="pair-tag">Loading Adjuster</span><h3>内参</h3><p id="pairReferenceMeta">尚未载入图片</p></div><label id="openPairReferenceImage" class="button button-primary file-button direct-file-picker"><span>选择图片</span><input id="pairReferenceInput" type="file" accept=".png,.jpg,.jpeg,.tif,.tiff,.bmp,image/png,image/jpeg,image/tiff,image/bmp" aria-label="从电脑选择内参 WB 图片" /></label></div>
+              <div class="pair-pane-header"><div><span class="pair-tag">Loading Adjuster</span><h3>内参</h3><p id="pairReferenceMeta">尚未载入图片</p></div><label id="openPairReferenceImage" class="button button-primary file-button direct-file-picker"><span>选择图片</span><input id="pairReferenceInput" type="file" accept=".png,.jpg,.jpeg,.tif,.tiff,.lsm,.bmp,image/png,image/jpeg,image/tiff,image/bmp" aria-label="从电脑选择内参 WB 图片" /></label></div>
               <div class="pair-canvas-frame"><canvas id="pairReferenceCanvas" aria-label="内参图像"></canvas><div id="pairReferenceEmpty" class="pair-empty">上传内参图后，在图上拖动即可手动框选。</div></div>
               <div class="pair-pane-tools"><button data-pair-auto="reference" type="button">自动框选</button><button data-pair-clear="reference" type="button">清除本侧 ROI</button><button data-pair-copy="reference" type="button">复制内参框到目的蛋白 →</button></div>
             </section>
 
             <section class="pair-pane" data-pair-pane="target">
-              <div class="pair-pane-header"><div><span class="pair-tag">Protein Analysis</span><h3>目的蛋白</h3><p id="pairTargetMeta">尚未载入图片</p></div><label id="openPairTargetImage" class="button button-primary file-button direct-file-picker"><span>选择图片</span><input id="pairTargetInput" type="file" accept=".png,.jpg,.jpeg,.tif,.tiff,.bmp,image/png,image/jpeg,image/tiff,image/bmp" aria-label="从电脑选择目的蛋白 WB 图片" /></label></div>
+              <div class="pair-pane-header"><div><span class="pair-tag">Protein Analysis</span><h3>目的蛋白</h3><p id="pairTargetMeta">尚未载入图片</p></div><label id="openPairTargetImage" class="button button-primary file-button direct-file-picker"><span>选择图片</span><input id="pairTargetInput" type="file" accept=".png,.jpg,.jpeg,.tif,.tiff,.lsm,.bmp,image/png,image/jpeg,image/tiff,image/bmp" aria-label="从电脑选择目的蛋白 WB 图片" /></label></div>
               <div class="pair-canvas-frame"><canvas id="pairTargetCanvas" aria-label="目的蛋白图像"></canvas><div id="pairTargetEmpty" class="pair-empty">上传目的蛋白图后，在图上拖动即可手动框选。</div></div>
               <div class="pair-pane-tools"><button data-pair-auto="target" type="button">自动框选</button><button data-pair-clear="target" type="button">清除本侧 ROI</button><button data-pair-copy="target" type="button">← 复制目的蛋白框到内参</button></div>
             </section>
@@ -270,7 +288,7 @@
               <p>多张 WB 图统一固定画框；按识别到的泳道从左到右放置数值与名称，并导出 PNG、可编辑 SVG 或 PDF。</p>
             </div>
             <div class="figure-actions">
-              <label id="openFigureImages" class="button button-primary file-button direct-file-picker"><span>上传 WB 图</span><input id="figureImageInput" type="file" accept=".png,.jpg,.jpeg,.tif,.tiff,.bmp,image/png,image/jpeg,image/tiff,image/bmp" multiple aria-label="从电脑选择一张或多张 WB 图片" /></label>
+              <label id="openFigureImages" class="button button-primary file-button direct-file-picker"><span>上传 WB 图</span><input id="figureImageInput" type="file" accept=".png,.jpg,.jpeg,.tif,.tiff,.lsm,.bmp,image/png,image/jpeg,image/tiff,image/bmp" multiple aria-label="从电脑选择一张或多张 WB 图片" /></label>
               <button id="usePairValues" class="button button-secondary" type="button">带入双图归一化值</button>
               <button id="exportWbFigure" class="button button-ghost" type="button">导出 600 DPI PNG</button>
               <button id="exportWbFigureSvg" class="button button-ghost" type="button">导出可编辑 SVG</button>
@@ -483,7 +501,7 @@
     </main>
 
     <footer class="app-footer">
-      <div><strong>BioAssay Studio v2.9.0</strong><span>科研数据与实验知识库均在本机处理，网站不接收上传内容。</span></div>
+      <div><strong>BioAssay Studio v2.10.0</strong><span>科研数据与实验知识库均在本机处理，网站不接收上传内容。</span></div>
       <nav aria-label="网站信息"><a href="privacy.html">隐私与数据处理</a><a href="THIRD_PARTY_NOTICES.txt">第三方许可</a><a href="README.md">使用说明</a></nav>
     </footer>
 
@@ -496,9 +514,18 @@
       </form>
     </dialog>
 
+    <dialog id="tiffPageDialog" class="sheet-dialog">
+      <form method="dialog">
+        <h3>选择要分析的 TIFF 图像页</h3>
+        <p><strong id="tiffPageFileName"></strong> 包含多个可读取页面。请选择真正的膜图；默认推荐像素数量最多的一页。</p>
+        <div id="tiffPageChoices" class="sheet-choices tiff-page-choices"></div>
+        <div class="dialog-actions"><button value="cancel" class="button button-ghost">使用推荐页</button><button id="confirmTiffPage" value="default" class="button button-primary">打开所选页面</button></div>
+      </form>
+    </dialog>
+
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
-    <script src="analysis-core.js?v=2.9.0"></script>
+    <script src="analysis-core.js?v=2.10.0"></script>
     <script src="vendor/chart.umd.js"></script>
-    <script src="app.js?v=2.9.0"></script>
+    <script src="app.js?v=2.10.0"></script>
   </body>
 </html>

@@ -1,4 +1,4 @@
-# BioAssay Studio v2.9.0
+# BioAssay Studio v2.10.0
 
 一个无需服务器、可离线运行的 qPCR、Western blot、蛋白定量与实验知识库浏览器工具。
 
@@ -18,7 +18,7 @@
 
 Windows 安装版使用与网页端完全相同的分析代码，并自带固定版本的 Chromium 运行内核；适合不希望配置浏览器、本地服务器或网络环境的实验室电脑。桌面版仍然在本机处理文件，知识库使用稳定的应用域名保存在本机用户数据目录，卸载程序默认不会删除这些数据。重要记录仍应定期使用知识库中的“导出备份”另存。桌面版只有在用户点击“检查更新”时才连接 GitHub Releases；发现新版本后由用户确认下载，下载完成后可立即重启安装或退出软件时安装。
 
-v2.9.0 新增 WB 半自动引导搜索区、四类凝胶预设、原始分辨率边界精修和不改变定量坐标的滚轮缩放/平移；用 120.tif（4 条）、3.tif（3 泳道 × 2 排，共 6 条）和 5.tif（8 条）建立本地真实图片回归清单。v2.8.2 重整实验知识库的桌面布局，避免计算结果被窄栏遮挡；扩充常用试剂分子量并支持名称自动回填；把原来的 OCR 占位流程升级为内置中英文 Tesseract 离线识别，同时允许截图直接保存到实验方法。v2.8.1 新增知识库选择式打印与打印预览，并为 Windows 安装版加入用户主动触发的在线更新流程。
+v2.10.0 新增多页 TIFF 页面选择、Deflate 压缩 TIFF 离线解码、LSM 尝试读取和 BigTIFF/CZI 明确转换提示；加入多图 WB 顺序批量初筛与 CSV 汇总；qPCR 和目的蛋白/内参结果可直接保存到离线知识库的计算历史。自动阈值继续采用 v2.9.0 已通过真实图回归的保守参数，避免为了弱带召回而重新引入宽带拆分或重复框选。v2.9.0 新增 WB 半自动引导搜索区、四类凝胶预设、原始分辨率边界精修和不改变定量坐标的滚轮缩放/平移；用 120.tif（4 条）、3.tif（3 泳道 × 2 排，共 6 条）和 5.tif（8 条）建立本地真实图片回归清单。v2.8.2 重整实验知识库的桌面布局，避免计算结果被窄栏遮挡；扩充常用试剂分子量并支持名称自动回填；把原来的 OCR 占位流程升级为内置中英文 Tesseract 离线识别，同时允许截图直接保存到实验方法。v2.8.1 新增知识库选择式打印与打印预览，并为 Windows 安装版加入用户主动触发的在线更新流程。
 
 ## 在线网站版
 
@@ -27,8 +27,8 @@ v2.9.0 新增 WB 半自动引导搜索区、四类凝胶预设、原始分辨率
 - 在线网页只把程序文件下载到访问者浏览器；WB 图片、Excel、ROI 和结果不通过应用代码上传。
 - Service Worker 会缓存程序外壳，首次成功访问后可在断网状态下继续打开；缓存不包含用户导入的实验文件。
 - qPCR、WB、项目恢复等全部文件入口都使用直接原生文件控件。
-- 发布包由 `tools/web-release/build_web_release.ps1` 生成，输出到 `releases/BioAssay-Studio-Web-v2.9.0.zip`。
-- Windows 安装包由 `desktop/bioassay-studio` 中的 Electron 构建配置生成，输出到 `releases/BioAssay-Studio-v2.9.0-Windows-x64-Setup.exe`，并同时生成在线更新所需的 `latest.yml` 与 blockmap。
+- 发布包由 `tools/web-release/build_web_release.ps1` 生成，输出到 `releases/BioAssay-Studio-Web-v2.10.0.zip`。
+- Windows 安装包由 `desktop/bioassay-studio` 中的 Electron 构建配置生成，输出到 `releases/BioAssay-Studio-v2.10.0-Windows-x64-Setup.exe`，并同时生成在线更新所需的 `latest.yml` 与 blockmap。
 - GitHub Pages 自动发布配置位于 `.github/workflows/deploy-pages.yml`。
 
 公开部署前应阅读 `privacy.html` 与 `THIRD_PARTY_NOTICES.txt`。当前SheetJS已升级至0.20.3，替代存在已知文件解析安全问题的旧0.18.5版本。

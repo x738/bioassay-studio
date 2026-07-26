@@ -6,8 +6,9 @@
   const qpcrHost = $('#qpcrStepContent');
   const toast = $('#toast');
   const sheetDialog = $('#sheetDialog');
+  const tiffPageDialog = $('#tiffPageDialog');
   const core = window.BioAssayCore;
-  const APP_VERSION = document.documentElement.dataset.appVersion || '2.9.0';
+  const APP_VERSION = document.documentElement.dataset.appVersion || '2.10.0';
   const auditLog = [];
   const history = { undo: [], redo: [], applying: false, max: 50 };
   const resourcePromises = new Map();
@@ -100,6 +101,13 @@
       minimumWidthFraction: 0.17,
     },
   };
+
+  const wbBatch = {
+    running: false,
+    entries: [],
+    files: [],
+  };
+  let pendingTiffPageChoice = null;
 
   const pair = {
     reference: { key: 'reference', label: '内参', fileName: '', image: null, imageCtx: null, canvas: null, ctx: null, rois: [], drawing: null, tempROI: null, nextId: 1, source: null },
@@ -252,6 +260,21 @@
     await loadScriptOnce(`experiment-library.js?v=${APP_VERSION}`, () => Boolean(window.ExperimentLibraryReady));
   }
 
+  async function saveAnalysisToLibrary(payload) {
+    try {
+      await ensureExperimentLibraryLoaded();
+      if (!window.ExperimentLibraryApi?.importCalculation) throw new Error('知识库接口尚未就绪');
+      const record = await window.ExperimentLibraryApi.importCalculation(payload);
+      toastMessage(`已保存到实验知识库的计算历史：${record.label}`);
+      recordAudit('analysis-saved-to-library', { type: payload.type, id: record.id });
+      return record;
+    } catch (error) {
+      console.error(error);
+      toastMessage(`保存到知识库失败：${error.message || '请稍后重试。'}`);
+      return null;
+    }
+  }
+
   function mean(values) {
     return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : NaN;
   }
@@ -383,12 +406,14 @@
     const bits = Math.min(32, ifd.t258?.[0] || 8);
     const channels = ifd.t277?.[0] || ifd.t258?.length || 1;
     const photometric = ifd.t262?.[0] ?? (channels === 1 ? 1 : 2);
-    if (![8, 16].includes(bits) || !ifd.data || ![1, 3, 4].includes(channels)) return null;
+    if (!(bits === 8 || (bits >= 9 && bits <= 16)) || !ifd.data || ![1, 3, 4].includes(channels)) return null;
     const maximum = 2 ** bits - 1;
     const values = new Float64Array(width * height);
     const bytes = ifd.data;
-    const read = offset => bits === 16 ? bytes[offset] + bytes[offset + 1] * 256 : bytes[offset];
-    const bytesPerSample = bits / 8;
+    const bytesPerSample = bits <= 8 ? 1 : 2;
+    const requiredBytes = width * height * channels * bytesPerSample;
+    if (bytes.length < requiredBytes) return null;
+    const read = offset => bytesPerSample === 2 ? bytes[offset] + bytes[offset + 1] * 256 : bytes[offset];
     for (let index = 0; index < values.length; index += 1) {
       const offset = index * channels * bytesPerSample;
       let gray;
@@ -399,28 +424,75 @@
     return { width, height, bitDepth: bits, channels, maxValue: maximum, values };
   }
 
-  async function decodeSourceFile(file) {
+  function chooseTiffPage(pages, fileName) {
+    const largest = pages.reduce((best, page) => page.area > best.area ? page : best, pages[0]);
+    if (pages.length <= 1 || !tiffPageDialog) return Promise.resolve(largest);
+    return new Promise(resolve => {
+      if (pendingTiffPageChoice) pendingTiffPageChoice.resolve(pendingTiffPageChoice.largest);
+      pendingTiffPageChoice = { resolve, pages, largest };
+      $('#tiffPageFileName').textContent = fileName;
+      $('#tiffPageChoices').innerHTML = pages.map(page => `
+        <label class="sheet-choice">
+          <input type="radio" name="tiffPage" value="${page.index}" ${page.index === largest.index ? 'checked' : ''} />
+          <div><strong>图像页 ${page.index + 1}</strong><span>${page.width} × ${page.height}px · ${page.bitDepth}-bit${page.index === largest.index ? ' · 推荐（像素最多）' : ''}</span></div>
+        </label>`).join('');
+      tiffPageDialog.showModal();
+    });
+  }
+
+  async function decodeSourceFile(file, options = {}) {
     const buffer = await file.arrayBuffer();
     const extension = file.name.split('.').pop()?.toLowerCase() || '';
-    const isTiff = ['tif', 'tiff'].includes(extension) || /tiff/i.test(file.type);
+    if (extension === 'czi') {
+      throw new Error('当前离线浏览器版不能直接解码 Zeiss CZI。请先在 ZEN、Fiji/Bio-Formats 或成像软件中导出为无损 16-bit TIFF；原 CZI 不会被修改或上传。');
+    }
+    const isTiff = ['tif', 'tiff', 'lsm'].includes(extension) || /tiff/i.test(file.type);
     const lossy = ['jpg', 'jpeg'].includes(extension) || /jpeg/i.test(file.type);
     const source = {
       fileName: file.name, mimeType: file.type || 'application/octet-stream', byteSize: file.size,
       sha256: await sha256Hex(buffer), format: isTiff ? 'TIFF' : extension.toUpperCase() || 'IMAGE',
-      bitDepth: 8, width: 0, height: 0, lossy, raw: null, warnings: [], originalSource: '',
+      bitDepth: 8, width: 0, height: 0, pageCount: 1, pageIndex: 0, lossy, raw: null, warnings: [], originalSource: '',
     };
     let image;
     if (isTiff) {
+      const signature = new Uint8Array(buffer, 0, Math.min(8, buffer.byteLength));
+      const littleEndian = signature[0] === 0x49 && signature[1] === 0x49;
+      const bigEndian = signature[0] === 0x4d && signature[1] === 0x4d;
+      const magic = littleEndian ? signature[2] + signature[3] * 256 : bigEndian ? signature[3] + signature[2] * 256 : 0;
+      if (magic === 43) throw new Error('该文件为 BigTIFF；当前离线解码器暂不支持。请在成像软件中导出为普通 TIFF（建议 16-bit）后再分析。');
+      await loadScriptOnce('vendor/pako_inflate.min.js', () => Boolean(window.pako?.inflate));
       await loadScriptOnce('vendor/UTIF.js', () => Boolean(window.UTIF));
       if (!window.UTIF) throw new Error('TIFF 解码组件未载入');
-      const ifds = UTIF.decode(buffer);
-      const ifd = [...ifds].filter(entry => entry.t256 && entry.t257).sort((a, b) => (b.t256[0] * b.t257[0]) - (a.t256[0] * a.t257[0]))[0];
-      if (!ifd) throw new Error('TIFF 中没有可读取的图像页');
+      let ifds;
+      try {
+        ifds = UTIF.decode(buffer);
+      } catch (error) {
+        throw new Error(`TIFF 目录解析失败：${error.message || '文件可能使用了当前解码器不支持的压缩或像素布局。'}`);
+      }
+      const pages = [...ifds].map((entry, index) => {
+        const width = Number(entry.t256?.[0] || entry.width || 0);
+        const height = Number(entry.t257?.[0] || entry.height || 0);
+        return { entry, index, width, height, area: width * height, bitDepth: Math.min(32, Number(entry.t258?.[0] || 8)) };
+      }).filter(page => page.width > 0 && page.height > 0);
+      if (!pages.length) throw new Error('TIFF 中没有可读取的图像页');
+      const largest = pages.reduce((best, page) => page.area > best.area ? page : best, pages[0]);
+      let selectedPage = largest;
+      if (Number.isInteger(options.pageIndex) && pages.some(page => page.index === options.pageIndex)) {
+        selectedPage = pages.find(page => page.index === options.pageIndex);
+      } else if (options.chooseTiffPage) {
+        selectedPage = await chooseTiffPage(pages, file.name);
+      }
+      const ifd = selectedPage.entry;
       UTIF.decodeImage(buffer, ifd, ifds);
+      source.pageCount = pages.length;
+      source.pageIndex = selectedPage.index;
       source.bitDepth = Math.min(32, ifd.t258?.[0] || 8);
       source.width = ifd.width;
       source.height = ifd.height;
       source.raw = tiffRawPlane(ifd);
+      if (pages.length > 1) {
+        source.warnings.push(`多页 TIFF：当前分析第 ${selectedPage.index + 1}/${pages.length} 页${options.chooseTiffPage ? '' : '（批处理自动选择像素最多的图像页）'}。`);
+      }
       const preview = document.createElement('canvas');
       preview.width = ifd.width; preview.height = ifd.height;
       const previewCtx = preview.getContext('2d');
@@ -434,7 +506,7 @@
         }
       } else {
         imageData.data.set(UTIF.toRGBA8(ifd));
-        source.warnings.push('该 TIFF 像素布局暂不支持原始位深计算，当前按 8-bit 预览分析。');
+        source.warnings.push('该 TIFF 像素布局暂不支持原始位深计算，当前按 8-bit 预览分析；建议导出为未压缩灰度 TIFF。');
       }
       previewCtx.putImageData(imageData, 0, 0);
       source.originalSource = preview.toDataURL('image/png');
@@ -456,7 +528,8 @@
     const digest = source.sha256 === 'unavailable' ? '浏览器不支持' : source.sha256 ? `${source.sha256.slice(0, 12)}…` : '未记录';
     const warnings = Array.isArray(source.warnings) ? source.warnings : [];
     const warning = warnings.length ? ` · 提醒：${warnings.join('；')}` : ' · 原始像素路径可用';
-    return `${source.fileName} · ${source.width} × ${source.height}px · ${source.format} ${source.bitDepth}-bit · ${sizeMb} · SHA-256 ${digest}${warning}`;
+    const page = Number(source.pageCount) > 1 ? ` · 第 ${Number(source.pageIndex || 0) + 1}/${source.pageCount} 页` : '';
+    return `${source.fileName} · ${source.width} × ${source.height}px · ${source.format} ${source.bitDepth}-bit${page} · ${sizeMb} · SHA-256 ${digest}${warning}`;
   }
 
   function sourceMetadata(source) {
@@ -813,7 +886,7 @@
     const down = qpcr.results.filter(result => result.foldChange < 0.67).length;
     const targetGenes = [...new Set(qpcr.results.map(result => result.gene))];
     return `
-      <div class="step-header"><div><h3>相对表达结果</h3><p>同时给出 Livak 2<sup>−ΔΔCt</sup> 与按各基因扩增效率校正的相对表达量；100% 效率时两者应接近。</p></div><button id="exportQpcr" class="button button-secondary">导出结果 CSV</button></div>
+      <div class="step-header"><div><h3>相对表达结果</h3><p>同时给出 Livak 2<sup>−ΔΔCt</sup> 与按各基因扩增效率校正的相对表达量；100% 效率时两者应接近。</p></div><div class="actions-row compact"><button id="saveQpcrToLibrary" class="button button-ghost">保存到知识库</button><button id="exportQpcr" class="button button-secondary">导出结果 CSV</button></div></div>
       <div class="result-cards"><div class="metric-card"><strong>${qpcr.results.length}</strong><span>样本 × 靶基因比较</span></div><div class="metric-card"><strong>${targetGenes.length}</strong><span>靶基因</span></div><div class="metric-card up"><strong>↑ ${up}</strong><span>上调（FC &gt; 1.5）</span></div><div class="metric-card down"><strong>↓ ${down}</strong><span>下调（FC &lt; 0.67）</span></div></div>
       <div class="result-tabs"><button class="result-tab ${qpcr.resultView === 'table' ? 'active' : ''}" data-result-view="table">结果表</button><button class="result-tab ${qpcr.resultView === 'chart' ? 'active' : ''}" data-result-view="chart">柱状图</button></div>
       <div id="resultTablePanel" class="${qpcr.resultView === 'table' ? '' : 'hide'}"><div class="table-wrap"><table><thead><tr><th>样本 / 组</th><th>生物学重复</th><th>基因</th><th>技术重复 N</th><th>Mean Ct</th><th>Ct SD</th><th>Ref Ct</th><th>ΔCt</th><th>ΔΔCt</th><th>Livak FC</th><th>效率校正 FC</th><th>传播误差</th><th>基线</th></tr></thead><tbody>${resultTableHtml()}</tbody></table></div><h4>生物学重复汇总</h4><p class="muted">仅当已映射“生物学重复”列时，N、SD 和 SEM 才代表独立生物学重复；未映射时 N 通常为 1。</p><div class="table-wrap"><table><thead><tr><th>样本 / 组</th><th>基因</th><th>生物学 N</th><th>Livak 均值</th><th>SD</th><th>SEM</th><th>效率校正均值</th><th>效率校正 SD</th></tr></thead><tbody>${biologicalSummaryHtml()}</tbody></table></div></div>
@@ -874,6 +947,7 @@
       $$('[data-result-view]').forEach(button => button.addEventListener('click', () => { qpcr.resultView = button.dataset.resultView; renderQpcr(); }));
       $('#reconfigureQpcr').addEventListener('click', () => { qpcr.step = 3; renderQpcr(); });
       $('#exportQpcr').addEventListener('click', exportQpcr);
+      $('#saveQpcrToLibrary').addEventListener('click', saveQpcrResultsToLibrary);
     }
   }
 
@@ -935,6 +1009,28 @@
     const csv = [header, ...body, [], summaryHeader, ...summaryBody].map(row => row.map(csvCell).join(',')).join('\n');
     downloadText('qpcr-ddct-results.csv', csv);
     toastMessage('qPCR 结果 CSV 已开始下载。');
+  }
+
+  function saveQpcrResultsToLibrary() {
+    if (!qpcr.results.length) return toastMessage('当前没有可保存的 qPCR 结果。');
+    const targets = [...new Set(qpcr.results.map(result => result.gene))];
+    const samples = [...new Set(qpcr.results.map(result => result.sample))];
+    return saveAnalysisToLibrary({
+      type: 'qpcr-ddct',
+      label: `qPCR ΔΔCt · ${new Date().toLocaleDateString('zh-CN')}`,
+      summary: `${samples.length} 个样本/组 · ${targets.length} 个靶基因 · ${qpcr.results.length} 条比较`,
+      input: {
+        references: [...qpcr.references],
+        controls: [...qpcr.controls],
+        efficiencies: { ...qpcr.efficiencies },
+        qc: { ...qpcr.qc },
+      },
+      result: {
+        rows: cloneData(qpcr.results),
+        biologicalSummaries: cloneData(biologicalSummaries()),
+      },
+      sourceModule: 'qPCR ΔΔCt 分析',
+    });
   }
 
   function resetQpcrWithDemo() {
@@ -1483,28 +1579,31 @@
     return { average: mean(values), spread: sd(values), maximum: Math.max(...values) };
   }
 
-  function wbSignalMap(maxSide = 900) {
-    const scale = Math.max(1, Math.ceil(Math.max(canvas.width, canvas.height) / maxSide));
-    const width = Math.ceil(canvas.width / scale);
-    const height = Math.ceil(canvas.height / scale);
-    const sourcePixels = wb.source?.raw?.values ? null : wb.imageCtx.getImageData(0, 0, canvas.width, canvas.height).data;
+  function signalMapForSource(sourceWidth, sourceHeight, imageCtx, source, maxSide = 900, invert = true) {
+    const scale = Math.max(1, Math.ceil(Math.max(sourceWidth, sourceHeight) / maxSide));
+    const width = Math.ceil(sourceWidth / scale);
+    const height = Math.ceil(sourceHeight / scale);
+    const sourcePixels = source?.raw?.values ? null : imageCtx.getImageData(0, 0, sourceWidth, sourceHeight).data;
     const signal = new Float32Array(width * height);
-    const invert = $('#invertIntensity').checked;
-    const maximum = wb.source?.raw?.maxValue || 255;
+    const maximum = source?.raw?.maxValue || 255;
     for (let y = 0; y < height; y += 1) {
-      const sourceY = Math.min(canvas.height - 1, y * scale);
+      const sourceY = Math.min(sourceHeight - 1, y * scale);
       for (let x = 0; x < width; x += 1) {
-        const sourceX = Math.min(canvas.width - 1, x * scale);
+        const sourceX = Math.min(sourceWidth - 1, x * scale);
         let grayscale;
-        if (wb.source?.raw?.values) grayscale = wb.source.raw.values[sourceY * canvas.width + sourceX];
+        if (source?.raw?.values) grayscale = source.raw.values[sourceY * sourceWidth + sourceX];
         else {
-          const offset = (sourceY * canvas.width + sourceX) * 4;
+          const offset = (sourceY * sourceWidth + sourceX) * 4;
           grayscale = 0.299 * sourcePixels[offset] + 0.587 * sourcePixels[offset + 1] + 0.114 * sourcePixels[offset + 2];
         }
         signal[y * width + x] = invert ? maximum - grayscale : grayscale;
       }
     }
     return { signal, width, height, scale };
+  }
+
+  function wbSignalMap(maxSide = 900) {
+    return signalMapForSource(canvas.width, canvas.height, wb.imageCtx, wb.source, maxSide, $('#invertIntensity').checked);
   }
 
   function profileAcrossRows(signal, width, x0, x1, y0, y1) {
@@ -2819,6 +2918,171 @@
     if (generated.length) toastMessage(`自动识别完成：${selected.length} 个候选条带。`);
   }
 
+  function renderWbBatch() {
+    const body = $('#wbBatchBody');
+    const progress = $('#wbBatchProgress');
+    const exportButton = $('#exportWbBatch');
+    if (!body || !progress || !exportButton) return;
+    exportButton.disabled = !wbBatch.entries.some(entry => entry.status === 'done');
+    if (wbBatch.running) {
+      const completed = wbBatch.entries.filter(entry => ['done', 'error'].includes(entry.status)).length;
+      progress.textContent = `正在逐张处理：${completed}/${wbBatch.entries.length}。为避免浏览器卡顿，图片按顺序解码。`;
+      progress.classList.add('running');
+    } else {
+      progress.classList.remove('running');
+      progress.textContent = wbBatch.files.length
+        ? `已选择 ${wbBatch.files.length} 张图片；批处理只生成候选初筛，点击“打开复核”可进入单图工作区调整 ROI。`
+        : '尚未选择图片。批处理结果是候选初筛，不代替逐张人工确认。';
+    }
+    body.innerHTML = wbBatch.entries.length ? wbBatch.entries.map((entry, index) => {
+      if (entry.status === 'pending') return `<tr><td>${escapeHtml(entry.fileName)}</td><td>—</td><td>—</td><td>等待</td><td>—</td><td>等待处理</td><td></td></tr>`;
+      if (entry.status === 'running') return `<tr><td>${escapeHtml(entry.fileName)}</td><td>—</td><td>—</td><td>处理中</td><td>—</td><td>正在解码与识别</td><td></td></tr>`;
+      if (entry.status === 'error') return `<tr><td>${escapeHtml(entry.fileName)}</td><td>—</td><td>—</td><td>失败</td><td>—</td><td class="batch-warning">${escapeHtml(entry.error)}</td><td><button type="button" data-wb-batch-open="${index}">手动打开</button></td></tr>`;
+      const page = Number(entry.source.pageCount) > 1 ? `${Number(entry.source.pageIndex || 0) + 1}/${entry.source.pageCount}` : '1/1';
+      const warning = entry.qcBad
+        ? `${entry.qcBad} 个候选需重点复核`
+        : entry.source.warnings?.length
+          ? entry.source.warnings.join('；')
+          : '候选初筛通过';
+      return `<tr><td>${escapeHtml(entry.fileName)}</td><td>${page}</td><td>${entry.source.width} × ${entry.source.height}</td><td><b>${entry.candidates.length}</b></td><td>${fmt(entry.meanCorrected, 1)}</td><td class="${entry.qcBad || entry.source.warnings?.length ? 'batch-warning' : 'batch-good'}">${escapeHtml(warning)}</td><td><button type="button" data-wb-batch-open="${index}">打开复核</button></td></tr>`;
+    }).join('') : '<tr class="empty-row"><td colspan="7">等待批处理图片。</td></tr>';
+    $$('[data-wb-batch-open]', body).forEach(button => button.addEventListener('click', () => {
+      const entry = wbBatch.entries[Number(button.dataset.wbBatchOpen)];
+      if (entry?.file) loadWbImage(entry.file);
+    }));
+  }
+
+  function batchLocalBackground(source, imageCtx, roi, sourceWidth, sourceHeight) {
+    const gap = Math.max(2, Math.round(roi.height * 0.35));
+    const stripHeight = Math.max(3, Math.round(roi.height * 0.8));
+    const x0 = clamp(roi.x, 0, sourceWidth - 1);
+    const x1 = clamp(roi.x + roi.width, x0 + 1, sourceWidth);
+    const regions = [];
+    if (roi.y - gap - stripHeight >= 0) regions.push({ y0: roi.y - gap - stripHeight, y1: roi.y - gap });
+    if (roi.y + roi.height + gap + stripHeight <= sourceHeight) regions.push({ y0: roi.y + roi.height + gap, y1: roi.y + roi.height + gap + stripHeight });
+    if (!regions.length) return { intensity: 0, sd: NaN, count: 0, available: false };
+    const values = regions.flatMap(region => regionIntensityValues(source, imageCtx, { x: x0, y: region.y0, width: x1 - x0, height: region.y1 - region.y0 }, true));
+    const stats = robustStats(values);
+    return { ...stats, count: values.length };
+  }
+
+  async function processWbBatchFile(file, settings) {
+    const { image, source } = await decodeSourceFile(file);
+    const imageCtx = analysisContextForImage(image);
+    const width = image.naturalWidth;
+    const height = image.naturalHeight;
+    const map = signalMapForSource(width, height, imageCtx, source, settings.preset.mapMaxSide, true);
+    const detection = findBandCandidatesFromMap(
+      map,
+      width,
+      height,
+      settings.sensitivity,
+      settings.expectedLanes,
+      settings.bandsPerLane,
+      settings.minimumBandGap,
+      settings.markerPercent,
+      settings.edgePadding,
+      null,
+      settings.preset,
+    );
+    const perLaneLimit = settings.bandsPerLane > 0 ? settings.bandsPerLane : 1;
+    const candidatesByLane = new Map();
+    detection.candidates.sort((a, b) => b.score - a.score).forEach(candidate => {
+      if (!candidatesByLane.has(candidate.laneIndex)) candidatesByLane.set(candidate.laneIndex, []);
+      if (candidatesByLane.get(candidate.laneIndex).length < perLaneLimit) candidatesByLane.get(candidate.laneIndex).push(candidate);
+    });
+    const candidates = [...candidatesByLane.values()].flat().sort((a, b) => a.laneIndex - b.laneIndex || a.y - b.y);
+    const measurements = candidates.map(candidate => {
+      const measured = regionMeasurement(source, imageCtx, candidate, true);
+      const background = batchLocalBackground(source, imageCtx, candidate, width, height);
+      const correctedMean = measured.intensity - background.intensity;
+      const corrected = Math.max(0, correctedMean * candidate.width * candidate.height);
+      const snr = background.available ? correctedMean / Math.max(background.sd || 0, 1) : NaN;
+      const quality = bandQuality({
+        saturatedFraction: measured.saturatedFraction,
+        hardClippedFraction: measured.hardClippedFraction,
+        clippedRunFraction: measured.clippedRunFraction,
+        saturationSeverity: measured.saturationSeverity,
+        corrected,
+        snr,
+        backgroundAvailable: background.available,
+        touchesEdge: candidate.x <= 1 || candidate.y <= 1 || candidate.x + candidate.width >= width - 1 || candidate.y + candidate.height >= height - 1,
+        confidence: Math.round(clamp(candidate.score * 100, 1, 99)),
+      });
+      return { ...candidate, ...measured, background: background.intensity, corrected, snr, quality };
+    });
+    return {
+      status: 'done',
+      file,
+      fileName: file.name,
+      source: sourceMetadata(source),
+      candidates,
+      measurements,
+      meanCorrected: mean(measurements.map(row => row.corrected).filter(Number.isFinite)),
+      qcBad: measurements.filter(row => row.quality.severity !== 'good').length,
+    };
+  }
+
+  async function runWbBatch() {
+    if (wbBatch.running) return;
+    if (!wbBatch.files.length) return toastMessage('请先选择多张 WB 图片。');
+    const preset = currentWbPreset();
+    const settings = {
+      preset,
+      sensitivity: number($('#autoSensitivity').value, 65),
+      expectedLanes: clamp(Math.round(number($('#wbBatchLaneCount').value, 0)), 0, 96),
+      bandsPerLane: clamp(Math.round(number($('#wbBatchBandsPerLane').value, 0)), 0, 8),
+      minimumBandGap: clamp(Math.round(number($('#autoBandGap').value, 12)), 2, 160),
+      markerPercent: clamp(number($('#autoMarkerPercent').value, 0), 0, 40),
+      edgePadding: clamp(number($('#autoEdgePadding').value, 4), 0, 30),
+    };
+    wbBatch.running = true;
+    wbBatch.entries = wbBatch.files.map(file => ({ status: 'pending', file, fileName: file.name }));
+    renderWbBatch();
+    for (let index = 0; index < wbBatch.files.length; index += 1) {
+      wbBatch.entries[index].status = 'running';
+      renderWbBatch();
+      try {
+        wbBatch.entries[index] = await processWbBatchFile(wbBatch.files[index], settings);
+      } catch (error) {
+        console.error(error);
+        wbBatch.entries[index] = { status: 'error', file: wbBatch.files[index], fileName: wbBatch.files[index].name, error: error.message || '图片处理失败' };
+      }
+      renderWbBatch();
+      await new Promise(resolve => setTimeout(resolve, 0));
+    }
+    wbBatch.running = false;
+    renderWbBatch();
+    const completed = wbBatch.entries.filter(entry => entry.status === 'done').length;
+    toastMessage(`WB 批处理完成：${completed}/${wbBatch.entries.length} 张成功。`);
+    recordAudit('wb-batch-completed', { total: wbBatch.entries.length, completed, preset: preset.key });
+  }
+
+  function exportWbBatch() {
+    const rows = wbBatch.entries.filter(entry => entry.status === 'done').flatMap(entry => entry.measurements.map((measurement, index) => [
+      entry.fileName,
+      Number(entry.source.pageIndex || 0) + 1,
+      entry.source.pageCount || 1,
+      entry.source.width,
+      entry.source.height,
+      index + 1,
+      measurement.laneIndex + 1,
+      measurement.bandIndex + 1,
+      measurement.x,
+      measurement.y,
+      measurement.width,
+      measurement.height,
+      measurement.corrected,
+      measurement.snr,
+      measurement.saturationSeverity,
+      measurement.quality?.text,
+    ]));
+    if (!rows.length) return toastMessage('当前没有可导出的批处理结果。');
+    const header = ['File', 'TIFF page', 'TIFF page count', 'Image width', 'Image height', 'Candidate', 'Lane', 'Band in lane', 'X', 'Y', 'Width', 'Height', 'Background corrected IntDen', 'SNR', 'Saturation', 'QC'];
+    downloadText('western-blot-batch-screening.csv', [header, ...rows].map(row => row.map(csvCell).join(',')).join('\n'));
+    toastMessage('WB 批处理 CSV 已开始下载。');
+  }
+
   function regionIntensityValues(source, imageCtx, rect, invert, stride = 1, exclude = null) {
     const width = source?.raw?.width || imageCtx.canvas.width;
     const height = source?.raw?.height || imageCtx.canvas.height;
@@ -3137,7 +3401,7 @@
     if (!file) return;
     pushHistory('载入 WB 图像');
     try {
-      const { image, source } = await decodeSourceFile(file);
+      const { image, source } = await decodeSourceFile(file, { chooseTiffPage: true });
       wb.image = image;
       wb.source = source;
       wb.fileName = file.name;
@@ -3441,7 +3705,7 @@
     const pane = pair[key];
     pushHistory(`载入${pane.label}图像`);
     try {
-        const { image, source } = await decodeSourceFile(file);
+        const { image, source } = await decodeSourceFile(file, { chooseTiffPage: true });
         pane.image = image;
         pane.source = source;
         pane.fileName = file.name;
@@ -3545,6 +3809,28 @@
     const values = rows.map(row => [row.lane, row.target?.corrected, row.target?.snr, row.target?.saturatedFraction, row.target?.hardClippedFraction, row.target?.saturationSeverity, row.reference?.corrected, row.reference?.snr, row.reference?.saturatedFraction, row.reference?.hardClippedFraction, row.reference?.saturationSeverity, row.ratio, row.relative, row.currentLoad, row.suggestedLoad, pair.baseline, $('#pairAllowSaturatedCalibration').checked, row.quality?.text]);
     downloadText('western-blot-dual-normalization.csv', [header, ...values].map(row => row.map(csvCell).join(',')).join('\n'));
     toastMessage('双图归一化 CSV 已开始下载。');
+  }
+
+  function savePairResultsToLibrary() {
+    const rows = pairResultRows();
+    if (!rows.length) return toastMessage('请先载入双图并完成条带配对。');
+    return saveAnalysisToLibrary({
+      type: 'wb-dual-normalization',
+      label: `WB 双图归一化 · ${new Date().toLocaleDateString('zh-CN')}`,
+      summary: `${rows.length} 个泳道 · 基准泳道 ${pair.baseline || '未设置'}`,
+      input: {
+        referenceImage: sourceMetadata(pair.reference.source),
+        targetImage: sourceMetadata(pair.target.source),
+        baselineLane: pair.baseline,
+        defaultLoadVolume: pair.defaultLoadVolume,
+        loads: { ...pair.loads },
+        backgroundCorrection: $('#pairAutoBackground').checked,
+      },
+      result: {
+        rows: cloneData(rows),
+      },
+      sourceModule: 'Western blot 目的蛋白/内参双图',
+    });
   }
 
   function bindPairCanvas(pane) {
@@ -5545,7 +5831,33 @@
       qpcr.pendingWorkbook = null;
       sheetDialog.close();
     });
+    tiffPageDialog?.addEventListener('submit', event => {
+      event.preventDefault();
+      const pending = pendingTiffPageChoice;
+      if (!pending) { tiffPageDialog.close(); return; }
+      const selectedIndex = event.submitter?.id === 'confirmTiffPage'
+        ? Number($('input[name="tiffPage"]:checked', tiffPageDialog)?.value)
+        : pending.largest.index;
+      const selected = pending.pages.find(page => page.index === selectedIndex) || pending.largest;
+      pendingTiffPageChoice = null;
+      tiffPageDialog.close();
+      pending.resolve(selected);
+    });
+    tiffPageDialog?.addEventListener('cancel', event => {
+      event.preventDefault();
+      const pending = pendingTiffPageChoice;
+      pendingTiffPageChoice = null;
+      tiffPageDialog.close();
+      pending?.resolve(pending.largest);
+    });
     $('#wbImageInput').addEventListener('change', event => loadWbImage(event.target.files[0]));
+    $('#wbBatchInput').addEventListener('change', event => {
+      wbBatch.files = [...event.target.files].filter(Boolean);
+      wbBatch.entries = [];
+      renderWbBatch();
+    });
+    $('#runWbBatch').addEventListener('click', runWbBatch);
+    $('#exportWbBatch').addEventListener('click', exportWbBatch);
     $('#roiType').addEventListener('change', event => { $('#roiName').value = event.target.value === 'background' ? '背景' : `条带 ${wb.nextId}`; });
     $('#invertIntensity').addEventListener('change', updateWb);
     $('#wbProfileSelect').addEventListener('change', event => { wb.profileRoiId = event.target.value; drawWbProfile(); });
@@ -5826,6 +6138,7 @@
       toastMessage(`已将 ${pair.defaultLoadVolume} µL 应用到全部泳道。`);
     });
     $('#exportPairWb').addEventListener('click', exportPairWb);
+    $('#savePairToLibrary').addEventListener('click', savePairResultsToLibrary);
     $('#clearPairWb').addEventListener('click', clearPairWorkspace);
     $('#figureImageInput').addEventListener('change', event => loadFigureImages(event.target.files));
     $('#usePairValues').addEventListener('click', usePairValuesForFigure);
@@ -5928,6 +6241,7 @@
   resetCoomassie(false);
   renderQpcr();
   updateWb();
+  renderWbBatch();
   renderPairResults();
   drawFigureEmptyState();
 
