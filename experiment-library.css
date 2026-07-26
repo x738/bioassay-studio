@@ -456,6 +456,20 @@
 .el-chemical-hint { display: block; color: #8495a1; font-size: 8px; line-height: 1.35; white-space: normal; }
 .el-chemical-hint.matched { color: var(--el-accent-dark); }
 .el-chemical-hint.warning { color: #906516; }
+.el-chemical-hint.online { color: #2368a2; }
+.el-chemical-online-row { display: flex; align-items: center; justify-content: space-between; gap: 5px; }
+.el-chemical-online-row .el-chemical-hint { min-width: 0; }
+.el-chemical-online-row button {
+  flex: none;
+  min-height: 21px;
+  padding: 3px 6px;
+  color: #2368a2;
+  border: 1px solid #b8d5ea;
+  border-radius: 5px;
+  background: #f3f9fd;
+  font-size: 8px;
+  font-weight: 800;
+}
 .el-concentration-field { display: grid; grid-template-columns: 68px 86px; gap: 4px; }
 .el-amount { color: var(--el-accent-dark); font-weight: 900; white-space: nowrap; }
 .el-basis { max-width: 230px; color: var(--el-muted); font-size: 8px; line-height: 1.4; }
@@ -637,6 +651,50 @@
   font-weight: 900;
 }
 .el-calculator-tabs button.active { color: #fff; background: var(--el-accent); }
+.el-pubchem-panel {
+  display: grid;
+  grid-template-columns: minmax(260px, 1fr) auto auto;
+  align-items: center;
+  gap: 12px;
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  color: #536778;
+  border: 1px solid var(--el-border);
+  border-radius: 9px;
+  background: var(--el-panel-soft);
+}
+.el-pubchem-panel.enabled { border-color: #b8d9d3; background: var(--el-accent-soft); }
+.el-pubchem-panel > div { display: grid; gap: 2px; min-width: 0; }
+.el-pubchem-panel > div b { color: var(--el-ink); font-size: 10px; }
+.el-pubchem-panel > div span { font-size: 8px; line-height: 1.45; }
+.el-pubchem-panel > a { color: var(--el-accent-dark); font-size: 8px; font-weight: 800; white-space: nowrap; }
+.el-pubchem-toggle { display: flex; align-items: center; gap: 7px; color: var(--el-muted); cursor: pointer; }
+.el-pubchem-toggle input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+.el-pubchem-toggle > span {
+  position: relative;
+  width: 30px;
+  height: 17px;
+  border: 1px solid #b9c7ce;
+  border-radius: 999px;
+  background: #dce5e8;
+  transition: background .16s ease, border-color .16s ease;
+}
+.el-pubchem-toggle > span::after {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(21, 42, 55, .25);
+  content: "";
+  transition: transform .16s ease;
+}
+.el-pubchem-toggle input:checked + span { border-color: var(--el-accent); background: var(--el-accent); }
+.el-pubchem-toggle input:checked + span::after { transform: translateX(13px); }
+.el-pubchem-toggle input:focus-visible + span { box-shadow: 0 0 0 3px rgba(23, 124, 120, .18); }
+.el-pubchem-toggle b { color: var(--el-ink); font-size: 8px; white-space: nowrap; }
 .el-calculator-layout { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 12px; align-items: start; }
 .el-calculator-form, .el-calculator-result { min-height: 370px; }
 .el-calculator-result { position: sticky; top: 12px; max-height: calc(100vh - 120px); overflow: auto; }
@@ -1039,6 +1097,8 @@
   .el-history-list { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .el-toolbar-actions { flex: 1 1 100%; justify-content: flex-start; }
   .el-notice { max-width: none; }
+  .el-pubchem-panel { grid-template-columns: minmax(0, 1fr) auto; }
+  .el-pubchem-panel > a { grid-column: 1 / -1; }
 }
 
 @media (prefers-color-scheme: dark) {
