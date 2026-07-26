@@ -11,8 +11,8 @@
     },
     {
         "path":  "app.js",
-        "bytes":  341725,
-        "sha256":  "e7c2a41a591df5f10ec6a8d9d9d2a8c87d8d5bf68d24e071617ab0147b74b4ce"
+        "bytes":  358752,
+        "sha256":  "3c16589eb47d28658433aeb39da930169f86584d6dbbe7580409f9a6ce3d4401"
     },
     {
         "path":  "experiment-core.js",
@@ -26,8 +26,8 @@
     },
     {
         "path":  "experiment-library.js",
-        "bytes":  111195,
-        "sha256":  "032c99c01e1598178f0d3bba89fe041b33d550a2cbd0bbf6e9558beef83bb1ed"
+        "bytes":  112302,
+        "sha256":  "9f720ac252ca5fcd8963c73d1e44027b241dc5ee2113d71b5290ed2caf199bb9"
     },
     {
         "path":  "icon.svg",
@@ -36,8 +36,8 @@
     },
     {
         "path":  "index.html",
-        "bytes":  38065,
-        "sha256":  "b259900f2a98411354a080401dcad22fea1bf53919a279cee81d174a306c3a2e"
+        "bytes":  40458,
+        "sha256":  "d7b0b50b946833348a5f6b580e95653bcc3edd8d896dda484b4f23a436090b43"
     },
     {
         "path":  "manifest.webmanifest",
@@ -46,13 +46,13 @@
     },
     {
         "path":  "privacy.html",
-        "bytes":  3359,
-        "sha256":  "5cf1135020669025deb22fca71c743eabd07822f2de32460e7897c5bbe6a0a4a"
+        "bytes":  3360,
+        "sha256":  "dbb9c385c5fc67c136aac9f684389d45cb51e5d223deb1390590ddd92a41c093"
     },
     {
         "path":  "README.md",
-        "bytes":  15502,
-        "sha256":  "9f4a7cc221bd2180211d11c1e7819adb146513f77db5b0442d51a3454160f37c"
+        "bytes":  15912,
+        "sha256":  "c53a1ad18fb43db9fc34fe1aeeae54d6cacf03b06a1ceafd5fe4f79387f9a004"
     },
     {
         "path":  "robots.txt",
@@ -61,18 +61,18 @@
     },
     {
         "path":  "service-worker.js",
-        "bytes":  2176,
-        "sha256":  "35abee2b5341990c8d36e722154e81bd9bfbf7d8fa231d3d837b303f3dbb470a"
+        "bytes":  2248,
+        "sha256":  "1d348dabd1425770313ded62f83fbe56e9e68caaccf9a39f4da25d607223748f"
     },
     {
         "path":  "styles.css",
-        "bytes":  39054,
-        "sha256":  "d001b69088a760cc6235a2785001d0893ae591f6b7ae5fe5e853ea08ed22869b"
+        "bytes":  41023,
+        "sha256":  "ddfd2c3f0c1d949972bd43ca9f82af2dfea70d19d46b57f65860e2081d8d5364"
     },
     {
         "path":  "THIRD_PARTY_NOTICES.txt",
-        "bytes":  1548,
-        "sha256":  "1a716627288f471122bc1affdf0dfc6b2833153fc8b5ab6d2decebcf4d6071a4"
+        "bytes":  1775,
+        "sha256":  "ba70f9c0a38c5d016dd0675abfd22cf3fd0dbe58300764934b129ea0803b9d36"
     },
     {
         "path":  "vendor/chart.umd.js",
@@ -83,6 +83,16 @@
         "path":  "vendor/CHARTJS-LICENSE.txt",
         "bytes":  1093,
         "sha256":  "41a84aa2caba645f966a18d9c2056b73e6d3a81d80bc0046bc0011a2634d4cce"
+    },
+    {
+        "path":  "vendor/pako_inflate.min.js",
+        "bytes":  22682,
+        "sha256":  "2ca27e9a8dae569cdeac42752ed1aed1afeff7f19282d3cc12c0aaa54a08bc04"
+    },
+    {
+        "path":  "vendor/PAKO-LICENSE.txt",
+        "bytes":  1104,
+        "sha256":  "a04665b3b2de56c66730c1f720f528175739e4104f79073614aa611da1e85539"
     },
     {
         "path":  "vendor/SHEETJS-LICENSE.txt",
