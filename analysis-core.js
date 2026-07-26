@@ -69,6 +69,39 @@
     return { n: rows.length, slope, intercept, r2, predictions };
   }
 
+  function standardDilutionPlan({
+    targetConcentration,
+    stockConcentration,
+    finalVolume,
+  } = {}) {
+    const target = Number(targetConcentration);
+    const stock = Number(stockConcentration);
+    const volume = Number(finalVolume);
+    if (![target, stock, volume].every(Number.isFinite) || target < 0 || stock <= 0 || volume <= 0) {
+      return {
+        valid: false,
+        stockVolume: NaN,
+        diluentVolume: NaN,
+        reason: '浓度和体积必须为有效正数，目标浓度可为 0。',
+      };
+    }
+    if (target > stock) {
+      return {
+        valid: false,
+        stockVolume: NaN,
+        diluentVolume: NaN,
+        reason: '目标浓度高于标准储备液浓度，无法通过稀释获得。',
+      };
+    }
+    const stockVolume = target * volume / stock;
+    return {
+      valid: true,
+      stockVolume,
+      diluentVolume: Math.max(0, volume - stockVolume),
+      reason: '',
+    };
+  }
+
   function coomassieSampleResult({
     absorbances = [],
     blankAbsorbance = 0,
@@ -528,6 +561,7 @@
     separateNeighborRois,
     setPngDpi,
     signalBoundaryQuality,
+    standardDilutionPlan,
     suggestedLoadVolume,
   };
 }));

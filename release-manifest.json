@@ -6,13 +6,13 @@
     },
     {
         "path":  "analysis-core.js",
-        "bytes":  23610,
-        "sha256":  "6eead63ddb245e3cd78540babf1dbf85938d2889790972ff9aa2d8de4b0f2710"
+        "bytes":  24579,
+        "sha256":  "6ba7d56a0efc6de89820d7399c1f1ec9ec5e42e9a9e5cc71527f6958da2e831e"
     },
     {
         "path":  "app.js",
-        "bytes":  358752,
-        "sha256":  "3c16589eb47d28658433aeb39da930169f86584d6dbbe7580409f9a6ce3d4401"
+        "bytes":  395797,
+        "sha256":  "3e9da7f53f528e64df0c46af28e0ebedb0c2f79b2b5b66f962c7c1f72ff7abe2"
     },
     {
         "path":  "experiment-core.js",
@@ -26,8 +26,8 @@
     },
     {
         "path":  "experiment-library.js",
-        "bytes":  112302,
-        "sha256":  "9f720ac252ca5fcd8963c73d1e44027b241dc5ee2113d71b5290ed2caf199bb9"
+        "bytes":  112306,
+        "sha256":  "751087eb3468c206fe74b7f0046cbe6c0eb83159ea3f572a49c267ab9c90744c"
     },
     {
         "path":  "icon.svg",
@@ -36,8 +36,8 @@
     },
     {
         "path":  "index.html",
-        "bytes":  40458,
-        "sha256":  "d7b0b50b946833348a5f6b580e95653bcc3edd8d896dda484b4f23a436090b43"
+        "bytes":  44044,
+        "sha256":  "5107f27145204ca5f2db2d50aa3783434d3565fdb379a640929be8ef5bcd84d8"
     },
     {
         "path":  "manifest.webmanifest",
@@ -46,13 +46,13 @@
     },
     {
         "path":  "privacy.html",
-        "bytes":  3360,
-        "sha256":  "dbb9c385c5fc67c136aac9f684389d45cb51e5d223deb1390590ddd92a41c093"
+        "bytes":  3358,
+        "sha256":  "2bd7acc03e3018003bac2ceab55169d81d2505db0bd42e3359c3119f655c0b70"
     },
     {
         "path":  "README.md",
-        "bytes":  15912,
-        "sha256":  "c53a1ad18fb43db9fc34fe1aeeae54d6cacf03b06a1ceafd5fe4f79387f9a004"
+        "bytes":  16336,
+        "sha256":  "c02b391354442520a98a3d434a2ea10a58ec7eb4a2de4d51965f05ba17c7ebb5"
     },
     {
         "path":  "robots.txt",
@@ -62,17 +62,17 @@
     {
         "path":  "service-worker.js",
         "bytes":  2248,
-        "sha256":  "1d348dabd1425770313ded62f83fbe56e9e68caaccf9a39f4da25d607223748f"
+        "sha256":  "ede2c811e3875a04adcfc79a36fce4863f91b48a30f93eea5125f6e597de714a"
     },
     {
         "path":  "styles.css",
-        "bytes":  41023,
-        "sha256":  "ddfd2c3f0c1d949972bd43ca9f82af2dfea70d19d46b57f65860e2081d8d5364"
+        "bytes":  44169,
+        "sha256":  "6405cb41e417d5af2ee57760deed77d40d81af4c6ea2c8527fea098fd733bf79"
     },
     {
         "path":  "THIRD_PARTY_NOTICES.txt",
         "bytes":  1775,
-        "sha256":  "ba70f9c0a38c5d016dd0675abfd22cf3fd0dbe58300764934b129ea0803b9d36"
+        "sha256":  "f4d1b9562793f9fcc4322941d58783bde5173c074006bcc3277d2205574053fe"
     },
     {
         "path":  "vendor/chart.umd.js",

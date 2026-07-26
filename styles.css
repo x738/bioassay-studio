@@ -159,6 +159,13 @@ tbody tr:last-child td { border-bottom: 0; }
 .coomassie-toolbar { display: grid; grid-template-columns: 150px 190px 170px minmax(170px, 1fr) minmax(210px, 1fr); gap: 12px; align-items: end; padding: 16px; border: 1px solid #dce9ed; border-radius: 12px; background: #f6fbfc; }
 .coomassie-check { min-height: 39px; align-content: center; padding: 8px 10px; border: 1px solid #d5e5e7; border-radius: 8px; background: #fff; }
 .coomassie-check input { flex: none; }
+.coomassie-automation { display: grid; grid-template-columns: minmax(230px, 1.05fr) minmax(150px, .55fr) minmax(290px, 1.2fr) minmax(185px, .7fr) auto; gap: 12px; align-items: end; margin-top: 12px; padding: 15px 16px; border: 1px solid #cfe5e3; border-radius: 12px; background: linear-gradient(135deg, #f1fbfa, #f8fcff); }
+.coomassie-automation-copy { display: flex; align-items: center; gap: 11px; }
+.coomassie-automation-copy h3 { margin: 0 0 4px; color: #173d4c; font-size: 15px; }
+.coomassie-automation-copy p { margin: 0; color: #617785; font-size: 11px; line-height: 1.45; }
+.coomassie-automation label { display: grid; gap: 6px; color: #536e72; font-size: 11px; font-weight: 800; }
+.coomassie-automation .coomassie-check { display: flex; align-items: center; }
+.coomassie-autosave { grid-column: 2 / -1; color: #39706d; font-size: 11px; text-align: right; }
 .coomassie-method-note { margin: 10px 2px 24px; color: #607489; font-size: 12px; line-height: 1.65; }
 .coomassie-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 18px; margin: 0 0 13px; }
 .coomassie-section-heading > div:first-child { display: flex; align-items: center; gap: 11px; }
@@ -170,15 +177,17 @@ tbody tr:last-child td { border-bottom: 0; }
 .coomassie-paste-card p { margin: 10px 0 7px; color: var(--muted); font-size: 11px; line-height: 1.55; }
 .coomassie-paste-card textarea { width: 100%; margin-bottom: 8px; padding: 9px 10px; resize: vertical; color: #1b2a43; border: 1px solid #d8e1ed; border-radius: 8px; background: #fff; font: 12px/1.5 Consolas, "Microsoft YaHei", monospace; }
 .coomassie-table-wrap { max-height: 390px; border-color: #dce5ea; }
-.coomassie-table { min-width: 1120px; }
+.coomassie-table { min-width: 1180px; }
 .coomassie-table th { position: sticky; z-index: 2; top: 0; white-space: nowrap; background: #eff7f7; color: #33555b; }
 .coomassie-table th, .coomassie-table td { padding: 8px; }
 .coomassie-table input, .coomassie-table select { min-width: 78px; padding: 6px 7px; font-size: 12px; }
+.coomassie-table input[type="checkbox"] { width: 17px; min-width: 17px; height: 17px; padding: 0; }
 .coomassie-table .name-input { min-width: 130px; }
 .coomassie-table .compact-input { width: 82px; min-width: 70px; }
 .coomassie-table .result-number { white-space: nowrap; color: #243a52; font-variant-numeric: tabular-nums; font-weight: 700; }
 .coomassie-table .row-warning { background: #fffaf0; }
 .coomassie-table .row-bad { background: #fff3f4; }
+.coomassie-table .row-excluded { opacity: .55; background: #f1f3f5; }
 .coomassie-remove { min-width: 34px; min-height: 30px; padding: 4px 8px; border: 1px solid #f0cbd1; border-radius: 7px; color: #a72d44; background: #fff7f8; font-weight: 800; }
 .coomassie-qc { display: inline-block; min-width: 54px; padding: 4px 7px; border-radius: 999px; text-align: center; font-size: 10px; font-weight: 900; }
 .coomassie-qc.good { color: #16754c; background: #e1f8ea; }
@@ -188,7 +197,11 @@ tbody tr:last-child td { border-bottom: 0; }
 .coomassie-curve-layout { display: grid; grid-template-columns: minmax(0, 1.65fr) minmax(280px, .7fr); gap: 14px; margin: 18px 0 26px; }
 .coomassie-chart-card, .coomassie-qc-card { min-width: 0; padding: 17px; border: 1px solid #dce6ee; border-radius: 12px; background: #fff; }
 .coomassie-card-title { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
-.coomassie-chart-wrap { position: relative; height: 310px; }
+.coomassie-chart-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 7px; }
+.button-small { min-height: 30px; padding: 5px 9px; font-size: 11px; }
+.coomassie-chart-wrap { position: relative; min-height: 390px; padding: 8px; border: 1px solid #edf0f3; background: #fff; }
+.coomassie-chart-wrap svg { display: block; width: 100%; height: auto; max-height: 430px; }
+.coomassie-chart-note { margin: 9px 2px 0; color: #687889; font-size: 11px; line-height: 1.55; }
 .fit-badge { padding: 5px 8px; border-radius: 999px; white-space: nowrap; font-size: 10px; font-weight: 900; }
 .fit-badge.good, .fit-advice.good { color: #117149; background: #e1f8ea; }
 .fit-badge.warn, .fit-advice.warn { color: #8b5700; background: #fff0d5; }
@@ -207,11 +220,15 @@ tbody tr:last-child td { border-bottom: 0; }
 @media (max-width: 1000px) {
   .coomassie-method-banner { grid-template-columns: 1fr 1fr; }
   .coomassie-toolbar { grid-template-columns: 1fr 1fr; }
+  .coomassie-automation { grid-template-columns: 1fr 1fr; }
+  .coomassie-automation-copy, .coomassie-autosave { grid-column: 1 / -1; }
   .coomassie-curve-layout { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 640px) {
   .coomassie-method-banner, .coomassie-toolbar { grid-template-columns: 1fr; }
+  .coomassie-automation { grid-template-columns: 1fr; }
+  .coomassie-automation-copy, .coomassie-autosave { grid-column: auto; text-align: left; }
   .coomassie-workspace { padding: 15px; }
   .coomassie-section-heading, .coomassie-result-footer { align-items: stretch; flex-direction: column; }
   .coomassie-section-heading .actions-group { width: 100%; }
@@ -262,14 +279,15 @@ tbody tr:last-child td { border-bottom: 0; }
 .wb-batch-panel > summary small { color: #8fa6c9; font-size: 12px; font-weight: 500; }
 .wb-batch-controls {
   display: grid;
-  grid-template-columns: minmax(180px, 1.2fr) repeat(2, minmax(130px, .65fr)) auto auto;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   gap: 10px;
   align-items: end;
   padding: 16px 18px;
   border-top: 1px solid rgba(110, 164, 255, .18);
 }
 .wb-batch-controls label:not(.file-button) { display: grid; gap: 6px; color: #aabddd; font-size: 12px; font-weight: 700; }
-.wb-batch-controls input[type="number"] {
+.wb-batch-controls input[type="number"],
+.wb-batch-controls select {
   min-height: 38px;
   color: #e8f0ff;
   border: 1px solid rgba(110, 164, 255, .28);
@@ -279,11 +297,23 @@ tbody tr:last-child td { border-bottom: 0; }
 .wb-batch-progress { padding: 0 18px 14px; color: #91a9ce; font-size: 12px; }
 .wb-batch-progress.running { color: #8fc9ff; }
 .wb-batch-table-wrap { margin: 0 18px 18px; border: 1px solid rgba(110, 164, 255, .18); border-radius: 10px; }
-.wb-batch-table-wrap table { min-width: 900px; }
+.wb-batch-table-wrap table { min-width: 1180px; }
 .wb-batch-table-wrap th { color: #9fb5d8; background: #101d38; }
 .wb-batch-table-wrap td { color: #d9e6fb; border-color: rgba(110, 164, 255, .13); }
 .wb-batch-table-wrap .batch-warning { color: #ffd48a; }
 .wb-batch-table-wrap .batch-good { color: #78d7af; }
+.wb-batch-table-wrap tr.is-selected { background: rgba(62, 132, 231, .14); }
+.wb-batch-params { display: grid; grid-template-columns: 68px 68px; gap: 6px; }
+.wb-batch-params label { display: grid; gap: 3px; color: #8097bc; font-size: 9px; font-weight: 800; }
+.wb-batch-params input { width: 68px; min-height: 30px; padding: 4px 6px; color: #e8f0ff; border: 1px solid rgba(110, 164, 255, .24); border-radius: 6px; background: #0e1930; }
+.wb-batch-actions { display: flex; flex-wrap: wrap; gap: 5px; min-width: 210px; }
+.wb-batch-actions button { min-height: 30px; padding: 5px 8px; border: 1px solid rgba(110, 164, 255, .28); border-radius: 6px; color: #dbe8ff; background: #15294b; font-size: 10px; font-weight: 800; }
+.wb-batch-actions button[data-wb-batch-confirm] { color: #85e2ba; border-color: rgba(76, 194, 142, .38); background: rgba(26, 91, 67, .28); }
+.wb-batch-actions button[data-wb-batch-remove] { color: #ffb5bd; border-color: rgba(234, 91, 110, .3); background: rgba(118, 34, 49, .25); }
+.wb-batch-status { display: inline-block; margin-bottom: 4px; padding: 3px 7px; border-radius: 999px; font-size: 9px; font-weight: 900; }
+.wb-batch-status.confirmed { color: #80deb7; background: rgba(35, 128, 91, .28); }
+.wb-batch-status.review { color: #ffd18a; background: rgba(142, 87, 12, .3); }
+.wb-batch-status.archived { color: #b8c8e8; background: rgba(72, 96, 142, .32); }
 
 @media (max-width: 1100px) {
   .wb-batch-controls { grid-template-columns: repeat(2, minmax(0, 1fr)); }
