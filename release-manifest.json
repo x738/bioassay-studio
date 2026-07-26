@@ -11,8 +11,8 @@
     },
     {
         "path":  "app.js",
-        "bytes":  395797,
-        "sha256":  "3e9da7f53f528e64df0c46af28e0ebedb0c2f79b2b5b66f962c7c1f72ff7abe2"
+        "bytes":  395795,
+        "sha256":  "ad53b46578f95ddfc54c913a366d9e50f58729a8f72ad543c85b24e0f1f5cf34"
     },
     {
         "path":  "experiment-core.js",
@@ -21,13 +21,13 @@
     },
     {
         "path":  "experiment-library.css",
-        "bytes":  43492,
-        "sha256":  "6951147d579503ef085c6cecc40b09b08e59efa3b346a3ee605977e0b7f1e58a"
+        "bytes":  45786,
+        "sha256":  "9fe1c586bb409db91e15f5f28d80cf37e19fcdf47010fbcd604319fca75c9d9d"
     },
     {
         "path":  "experiment-library.js",
-        "bytes":  112306,
-        "sha256":  "751087eb3468c206fe74b7f0046cbe6c0eb83159ea3f572a49c267ab9c90744c"
+        "bytes":  124516,
+        "sha256":  "232861be79516bcc412c5af86fdf54cbf67d39dbfe2c3b9afb8e15fda43f2efe"
     },
     {
         "path":  "icon.svg",
@@ -36,8 +36,8 @@
     },
     {
         "path":  "index.html",
-        "bytes":  44044,
-        "sha256":  "5107f27145204ca5f2db2d50aa3783434d3565fdb379a640929be8ef5bcd84d8"
+        "bytes":  44104,
+        "sha256":  "cae0ab39fb568c99bd500df19a15c9dcfa1dfa1249ba9e27b504713866efa333"
     },
     {
         "path":  "manifest.webmanifest",
@@ -46,13 +46,13 @@
     },
     {
         "path":  "privacy.html",
-        "bytes":  3358,
-        "sha256":  "2bd7acc03e3018003bac2ceab55169d81d2505db0bd42e3359c3119f655c0b70"
+        "bytes":  4482,
+        "sha256":  "b09b8f4d979d6d8cc1c30fc5cb8224d68cd9f2a6bf276cb19deb09554b542ac9"
     },
     {
         "path":  "README.md",
-        "bytes":  16336,
-        "sha256":  "c02b391354442520a98a3d434a2ea10a58ec7eb4a2de4d51965f05ba17c7ebb5"
+        "bytes":  16827,
+        "sha256":  "767ef648cd1c22642776cbe4a8ff52a6249bb1d5f93cce0bd9c3bde14ff3e386"
     },
     {
         "path":  "robots.txt",
@@ -62,7 +62,7 @@
     {
         "path":  "service-worker.js",
         "bytes":  2248,
-        "sha256":  "ede2c811e3875a04adcfc79a36fce4863f91b48a30f93eea5125f6e597de714a"
+        "sha256":  "1a107b18f7e88f2273972d0fa1d76cc386dfb91990dc9b17f68ae0b58c8ea948"
     },
     {
         "path":  "styles.css",
@@ -72,7 +72,7 @@
     {
         "path":  "THIRD_PARTY_NOTICES.txt",
         "bytes":  1775,
-        "sha256":  "f4d1b9562793f9fcc4322941d58783bde5173c074006bcc3277d2205574053fe"
+        "sha256":  "9cbdc638ef8fd6ec69a15e1002f5da927b4ad26d81676c142f3176ca77d39ad9"
     },
     {
         "path":  "vendor/chart.umd.js",

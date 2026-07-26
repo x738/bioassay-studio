@@ -1,6 +1,6 @@
 {
   "name": "bioassay-studio-desktop",
-  "version": "2.10.0",
+  "version": "2.12.0",
   "description": "BioAssay Studio offline scientific data workstation for Windows",
   "main": "main.js",
   "author": "x738",

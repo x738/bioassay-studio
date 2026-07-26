@@ -8,6 +8,8 @@
   const DB_NAME = 'bioassay-experiment-library';
   const DB_VERSION = 1;
   const STORE_NAMES = ['recipes', 'protocols', 'stocks', 'chemicals', 'ocrRecords', 'calculations', 'attachments', 'tags'];
+  const PUBCHEM_BASE_URL = 'https://pubchem.ncbi.nlm.nih.gov/rest/pug';
+  const PUBCHEM_ENABLED_KEY = 'bioassay-pubchem-enabled';
   const PAGE_LABELS = {
     home: '知识库首页',
     recipes: '实验配方',
@@ -53,6 +55,10 @@
     searchResults: [],
     objectUrls: new Set(),
     storage: { persisted: false, usage: 0, quota: 0 },
+    pubchem: {
+      enabled: false,
+      statuses: {},
+    },
     print: {
       open: false,
       selectedKeys: [],
@@ -65,6 +71,7 @@
     },
   };
   let initializationPromise = null;
+  const pubChemControllers = new Map();
 
   function uid(prefix = 'item') {
     if (globalThis.crypto?.randomUUID) return `${prefix}-${globalThis.crypto.randomUUID()}`;
@@ -223,7 +230,7 @@
     target.className = `el-notice ${tone}`;
     window.clearTimeout(notice.timer);
     notice.timer = window.setTimeout(() => {
-      target.textContent = '全部数据仅保存在当前浏览器';
+      target.textContent = '实验数据仅保存在当前浏览器';
       target.className = 'el-notice';
     }, 4200);
   }
@@ -287,12 +294,12 @@
     mount.innerHTML = `
       <div class="el-toolbar">
         <div>
-          <span class="el-offline-badge">OFFLINE · IndexedDB · ${state.storage.persisted ? '持久存储' : '建议定期备份'}${state.storage.usage ? ` · ${fileSizeText(state.storage.usage)}` : ''}</span>
+          <span class="el-offline-badge">OFFLINE FIRST · IndexedDB · ${state.storage.persisted ? '持久存储' : '建议定期备份'}${state.storage.usage ? ` · ${fileSizeText(state.storage.usage)}` : ''}</span>
           <strong>个人实验知识库</strong>
           <span id="elAutosaveStatus" data-state="${state.autosaveState}">已自动保存</span>
         </div>
         <div class="el-toolbar-actions">
-          <span id="elNotice" class="el-notice">全部数据仅保存在当前浏览器</span>
+          <span id="elNotice" class="el-notice">实验数据仅保存在当前浏览器</span>
           <button type="button" data-el-action="open-print">打印 / 预览</button>
           <button type="button" data-el-action="export-library">导出备份</button>
           <label class="el-file-button">导入备份<input id="elBackupInput" type="file" accept=".json,application/json" /></label>
@@ -479,13 +486,46 @@
       .join('');
   }
 
-  function chemicalMatchHint(name) {
+  function pubChemLookupKey(kind, index) {
+    if (kind === 'molarity') return 'molarity';
+    if (kind === 'recipe-component') {
+      const recipe = selectedRecord();
+      return `recipe:${recipe?.id || 'none'}:${recipe?.components?.[index]?.id || index}`;
+    }
+    return `calculator:${state.calculatorDraft.buffer.components[index]?.id || index}`;
+  }
+
+  function chemicalMatchHint(name, lookup = null) {
     const chemical = findChemicalRecord(name);
-    if (!chemical) return '<small class="el-chemical-hint">输入试剂名后从候选中选择</small>';
+    if (!chemical) {
+      if (!lookup) return '<small class="el-chemical-hint">输入试剂名后从候选中选择</small>';
+      const query = String(name || '').trim();
+      const key = pubChemLookupKey(lookup.kind, lookup.index);
+      const status = state.pubchem.statuses[key];
+      if (status?.state === 'loading') return `<small class="el-chemical-hint online">正在 PubChem 查询“${escapeHtml(query)}”…</small>`;
+      if (status?.state === 'error') {
+        return `<span class="el-chemical-online-row"><small class="el-chemical-hint warning">${escapeHtml(status.message)}</small><button type="button" data-el-action="lookup-pubchem" data-el-lookup-kind="${escapeAttr(lookup.kind)}" data-el-lookup-index="${escapeAttr(lookup.index ?? '')}">重试</button></span>`;
+      }
+      if (!query) return '<small class="el-chemical-hint">输入试剂名后从候选中选择</small>';
+      if (!state.pubchem.enabled) return '<small class="el-chemical-hint">本地库未匹配；可开启 PubChem 在线补全</small>';
+      return `<span class="el-chemical-online-row"><small class="el-chemical-hint online">离开输入框后自动在线匹配</small><button type="button" data-el-action="lookup-pubchem" data-el-lookup-kind="${escapeAttr(lookup.kind)}" data-el-lookup-index="${escapeAttr(lookup.index ?? '')}">立即查询</button></span>`;
+    }
     if (Number(chemical.molecularWeight) > 0) {
-      return `<small class="el-chemical-hint matched">${escapeHtml(chemical.formula || chemical.name)} · MW ${escapeHtml(Core.formatNumber(chemical.molecularWeight))}</small>`;
+      const source = chemical.source === 'PubChem PUG REST'
+        ? ` · PubChem CID ${escapeHtml(String(chemical.pubchemCid || ''))} · 请核对盐型/水合物`
+        : '';
+      return `<small class="el-chemical-hint matched">${escapeHtml(chemical.formula || chemical.name)} · MW ${escapeHtml(Core.formatNumber(chemical.molecularWeight))}${source}</small>`;
     }
     return `<small class="el-chemical-hint warning">${escapeHtml(chemical.notes || '该试剂无固定分子量，请按百分浓度或母液计算。')}</small>`;
+  }
+
+  function renderPubChemAccessPanel() {
+    return `
+      <div class="el-pubchem-panel ${state.pubchem.enabled ? 'enabled' : ''}">
+        <div><b>分子量来源</b><span>优先匹配本地试剂库；在线模式仅把你输入的试剂名称发送给 PubChem，结果会缓存到本机。</span></div>
+        <label class="el-pubchem-toggle"><input type="checkbox" data-el-pubchem-toggle ${state.pubchem.enabled ? 'checked' : ''} /><span aria-hidden="true"></span><b>${state.pubchem.enabled ? 'PubChem 在线补全已开启' : '仅使用本地数据库'}</b></label>
+        <a href="privacy.html" target="_blank" rel="noreferrer">数据说明</a>
+      </div>`;
   }
 
   function renderRecipeEditor(recipe) {
@@ -502,12 +542,13 @@
       </div>
       <section class="el-editor-section">
         <div class="el-section-title"><div><h4>配方组成</h4><p>“自动选择”会优先调用同名母液；没有母液时按分子量称量。</p></div><button type="button" data-el-action="add-component">＋ 添加成分</button></div>
+        ${renderPubChemAccessPanel()}
         <div class="el-table-wrap">
           <table class="el-recipe-table">
             <thead><tr><th>成分</th><th>最终浓度</th><th>来源</th><th>母液</th><th>分子量</th><th>实际加入量</th><th>计算依据</th><th></th></tr></thead>
             <tbody>${(recipe.components || []).map((component, index) => `
               <tr>
-                <td><div class="el-chemical-field"><input data-el-component="${index}" data-el-component-field="name" list="elChemicalOptions" autocomplete="off" value="${escapeAttr(component.name || '')}" placeholder="输入或选择试剂" />${chemicalMatchHint(component.name)}</div></td>
+                <td><div class="el-chemical-field"><input data-el-component="${index}" data-el-component-field="name" list="elChemicalOptions" autocomplete="off" value="${escapeAttr(component.name || '')}" placeholder="输入或选择试剂" />${chemicalMatchHint(component.name, { kind: 'recipe-component', index })}</div></td>
                 <td><div class="el-concentration-field"><input data-el-component="${index}" data-el-component-field="targetValue" type="number" min="0" step="any" value="${escapeAttr(component.targetValue || '')}" /><select data-el-component="${index}" data-el-component-field="targetUnit">${componentOptions(component.targetUnit)}</select></div></td>
                 <td><select data-el-component="${index}" data-el-component-field="sourceType">${sourceOptions(component.sourceType || 'auto')}</select></td>
                 <td><select data-el-component="${index}" data-el-component-field="stockId">${stockOptions(component.stockId, component.name)}</select></td>
@@ -730,7 +771,7 @@
         <div><b>v${record.version || 1}</b><small>${escapeHtml(dateText(record.updatedAt))}</small></div>
       </header>
       ${content}
-          <footer class="el-print-footer"><span>BioAssay Studio v${escapeHtml(document.documentElement.dataset.appVersion || '2.11.0')}</span><span>${index + 1} / ${total} · 打印预览生成于 ${escapeHtml(dateText(now()))}</span></footer>
+          <footer class="el-print-footer"><span>BioAssay Studio v${escapeHtml(document.documentElement.dataset.appVersion || '2.12.0')}</span><span>${index + 1} / ${total} · 打印预览生成于 ${escapeHtml(dateText(now()))}</span></footer>
     </article>`;
   }
 
@@ -879,6 +920,7 @@
     return `
       <div class="el-page-heading compact"><div><p>SMART CALCULATOR</p><h3>实验配方计算器</h3><span>每次计算自动写入历史，可一键保存为实验配方。</span></div></div>
       <div class="el-calculator-tabs">${Object.entries(tabs).map(([key, label]) => `<button type="button" class="${state.calculatorTab === key ? 'active' : ''}" data-el-calc-tab="${key}">${label}</button>`).join('')}</div>
+      ${renderPubChemAccessPanel()}
       <div class="el-calculator-layout">
         <section class="el-card el-calculator-form">${renderCalculatorForm()}</section>
         <aside class="el-card el-calculator-result">${renderCalculatorResult()}</aside>
@@ -899,7 +941,7 @@
       }).join('')}</select></label>`;
     }
     const list = options.list ? ` list="${escapeAttr(options.list)}" autocomplete="off"` : '';
-    const hint = options.chemicalHint ? chemicalMatchHint(value) : '';
+    const hint = options.chemicalHint ? chemicalMatchHint(value, options.chemicalLookup || null) : '';
     return `<label>${label}<input data-el-calc-field="${name}"${list} ${options.type === 'text' ? '' : 'type="number" step="any"'} value="${escapeAttr(value)}" placeholder="${escapeAttr(options.placeholder || '')}" />${hint}</label>`;
   }
 
@@ -908,7 +950,7 @@
     if (tab === 'molarity') {
       return `<div class="el-card-title"><div><h4>摩尔浓度配置</h4><p>m = C × V × MW</p></div></div>
         <div class="el-form-grid">
-          ${calcInput('chemicalName', '试剂名称', { type: 'text', placeholder: '输入或选择 HEPES、NaCl…', list: 'elChemicalOptions', chemicalHint: true })}
+          ${calcInput('chemicalName', '试剂名称', { type: 'text', placeholder: '输入或选择 HEPES、NaCl…', list: 'elChemicalOptions', chemicalHint: true, chemicalLookup: { kind: 'molarity' } })}
           ${calcInput('molecularWeight', '分子量（g/mol）')}
           ${calcInput('concentration', '目标浓度')}
           ${calcInput('concentrationUnit', '浓度单位', { select: ['M', 'mM', 'µM'] })}
@@ -954,10 +996,10 @@
         ${calcInput('targetPh', '目标 pH', { type: 'text' })}
         ${calcInput('storage', '保存条件', { type: 'text' })}
       </div>
-      <div class="el-chemical-library-note"><b>内置 ${chemicalRecords().length} 种常用生化试剂</b><span>输入中文名、英文名或化学式并从候选中选择，将自动填入分子量。水合物会单独列出，请以试剂瓶标签为准。</span></div>
+      <div class="el-chemical-library-note"><b>本机试剂库 ${chemicalRecords().length} 种</b><span>输入中文名、英文名或化学式将自动匹配；本地没有时可选 PubChem 在线补全。水合物会单独列出，请以试剂瓶标签为准。</span></div>
       <div class="el-table-wrap"><table class="el-buffer-table"><thead><tr><th>成分</th><th>目标浓度</th><th>来源</th><th>母液</th><th>MW (g/mol)</th><th></th></tr></thead><tbody>
         ${draft.components.map((component, index) => `<tr>
-          <td><div class="el-chemical-field"><input data-el-calc-component="${index}" data-el-calc-component-field="name" list="elChemicalOptions" autocomplete="off" value="${escapeAttr(component.name || '')}" placeholder="输入或选择试剂" />${chemicalMatchHint(component.name)}</div></td>
+          <td><div class="el-chemical-field"><input data-el-calc-component="${index}" data-el-calc-component-field="name" list="elChemicalOptions" autocomplete="off" value="${escapeAttr(component.name || '')}" placeholder="输入或选择试剂" />${chemicalMatchHint(component.name, { kind: 'calc-component', index })}</div></td>
           <td><div class="el-concentration-field"><input data-el-calc-component="${index}" data-el-calc-component-field="targetValue" type="number" step="any" value="${escapeAttr(component.targetValue || '')}" /><select data-el-calc-component="${index}" data-el-calc-component-field="targetUnit">${componentOptions(component.targetUnit)}</select></div></td>
           <td><select data-el-calc-component="${index}" data-el-calc-component-field="sourceType">${sourceOptions(component.sourceType || 'auto')}</select></td>
           <td><select data-el-calc-component="${index}" data-el-calc-component-field="stockId">${stockOptions(component.stockId, component.name)}</select></td>
@@ -1129,7 +1171,10 @@
       const chemical = findChemicalRecord(rawValue);
       if (chemical) {
         component.molecularWeight = Number(chemical.molecularWeight) > 0 ? chemical.molecularWeight : '';
-        component.molecularWeightSource = 'library';
+        component.molecularWeightSource = chemical.source === 'PubChem PUG REST' ? 'pubchem' : 'library';
+      } else if (component.molecularWeightSource !== 'manual') {
+        component.molecularWeight = '';
+        component.molecularWeightSource = '';
       }
     }
     scheduleSave(recipe);
@@ -1137,6 +1182,183 @@
 
   function findChemicalRecord(name) {
     return Core.findChemical(name, [...state.records.chemicals, ...Core.CHEMICALS]);
+  }
+
+  function pubChemTarget(kind, indexValue) {
+    const index = Number(indexValue);
+    if (kind === 'molarity') {
+      const draft = state.calculatorDraft.molarity;
+      return {
+        key: 'molarity',
+        get name() { return draft.chemicalName; },
+        get molecularWeightSource() { return draft.molecularWeightSource; },
+        apply(record) {
+          draft.molecularWeight = record.molecularWeight;
+          draft.molecularWeightSource = 'pubchem';
+          draft.pubchemCid = record.pubchemCid;
+          draft.pubchemTitle = record.name;
+          draft.formula = record.formula;
+        },
+      };
+    }
+    if (kind === 'recipe-component') {
+      const recipe = selectedRecord();
+      const component = recipe?.components?.[index];
+      if (!recipe || state.selection?.store !== 'recipes' || !component) return null;
+      return {
+        key: pubChemLookupKey(kind, index),
+        get name() { return component.name; },
+        get molecularWeightSource() { return component.molecularWeightSource; },
+        apply(record) {
+          component.molecularWeight = record.molecularWeight;
+          component.molecularWeightSource = 'pubchem';
+          component.pubchemCid = record.pubchemCid;
+          component.pubchemTitle = record.name;
+          component.formula = record.formula;
+          scheduleSave(recipe);
+        },
+      };
+    }
+    const component = state.calculatorDraft.buffer.components[index];
+    if (!component) return null;
+    return {
+      key: pubChemLookupKey('calc-component', index),
+      get name() { return component.name; },
+      get molecularWeightSource() { return component.molecularWeightSource; },
+      apply(record) {
+        component.molecularWeight = record.molecularWeight;
+        component.molecularWeightSource = 'pubchem';
+        component.pubchemCid = record.pubchemCid;
+        component.pubchemTitle = record.name;
+        component.formula = record.formula;
+      },
+    };
+  }
+
+  function stopPubChemLookups() {
+    pubChemControllers.forEach(controller => controller.abort());
+    pubChemControllers.clear();
+    Object.keys(state.pubchem.statuses).forEach(key => {
+      if (state.pubchem.statuses[key]?.state === 'loading') delete state.pubchem.statuses[key];
+    });
+  }
+
+  function setPubChemEnabled(enabled) {
+    state.pubchem.enabled = Boolean(enabled);
+    try {
+      localStorage.setItem(PUBCHEM_ENABLED_KEY, state.pubchem.enabled ? '1' : '0');
+    } catch (_) {
+      // localStorage can be unavailable in locked-down browser profiles.
+    }
+    if (!state.pubchem.enabled) stopPubChemLookups();
+    notice(
+      state.pubchem.enabled
+        ? '已开启 PubChem 在线补全。仅发送试剂名称；匹配结果会保存到本机试剂库。'
+        : '已切换为仅本地数据库，不会发起在线试剂查询。',
+      state.pubchem.enabled ? 'good' : 'info',
+    );
+  }
+
+  async function fetchPubChemRecord(query, signal) {
+    const encodedName = encodeURIComponent(String(query || '').trim());
+    if (!encodedName) throw new Error('请先输入试剂名称。');
+    const url = `${PUBCHEM_BASE_URL}/compound/name/${encodedName}/property/Title,MolecularFormula,MolecularWeight/JSON`;
+    const response = await fetch(url, {
+      method: 'GET',
+      headers: { Accept: 'application/json' },
+      cache: 'no-store',
+      referrerPolicy: 'no-referrer',
+      signal,
+    });
+    if (response.status === 404) throw new Error('PubChem 未找到该名称；请尝试英文名、CAS 号或更明确的盐型/水合物名称。');
+    if (!response.ok) throw new Error(`PubChem 查询失败（HTTP ${response.status}）。`);
+    const payload = await response.json();
+    const property = payload?.PropertyTable?.Properties?.[0];
+    const molecularWeight = Number(property?.MolecularWeight);
+    if (!property?.CID || !(molecularWeight > 0)) throw new Error('PubChem 返回结果缺少可用的分子量。');
+    return {
+      cid: Number(property.CID),
+      title: String(property.Title || query).trim(),
+      formula: String(property.MolecularFormula || '').trim(),
+      molecularWeight,
+    };
+  }
+
+  async function cachePubChemRecord(query, result) {
+    const queryName = String(query || '').trim();
+    const existing = state.records.chemicals.find(item => Number(item.pubchemCid) === Number(result.cid));
+    const aliases = [...new Set([
+      ...(Array.isArray(existing?.aliases) ? existing.aliases : []),
+      queryName,
+      result.title,
+    ].map(value => String(value || '').trim()).filter(Boolean))];
+    const timestamp = now();
+    const record = {
+      ...(existing || {}),
+      id: existing?.id || `pubchem-${result.cid}`,
+      name: result.title,
+      aliases,
+      formula: result.formula,
+      molecularWeight: result.molecularWeight,
+      category: 'PubChem 在线补全',
+      source: 'PubChem PUG REST',
+      pubchemCid: result.cid,
+      lookupName: queryName,
+      lookupAt: timestamp,
+      notes: '由 PubChem 在线补全并缓存到本机。不同盐型、水合物或混合物的分子量可能不同，正式配制前请核对试剂瓶标签。',
+      builtin: false,
+      createdAt: existing?.createdAt || timestamp,
+      updatedAt: timestamp,
+    };
+    await dbPut('chemicals', record);
+    if (existing) Object.assign(existing, record);
+    else state.records.chemicals.unshift(record);
+    return record;
+  }
+
+  async function lookupChemicalOnline(kind, indexValue, force = false) {
+    const target = pubChemTarget(kind, indexValue);
+    if (!target) return;
+    const query = String(target.name || '').trim();
+    if (!query) {
+      notice('请先输入试剂名称。', 'warn');
+      return;
+    }
+    const local = findChemicalRecord(query);
+    if (local && !force) {
+      target.apply(local);
+      refreshMain();
+      return;
+    }
+    if (!state.pubchem.enabled) {
+      notice('请先开启“PubChem 在线补全”。', 'warn');
+      return;
+    }
+    if (!force && target.molecularWeightSource === 'manual') return;
+
+    pubChemControllers.get(target.key)?.abort();
+    const controller = new AbortController();
+    pubChemControllers.set(target.key, controller);
+    const timeout = window.setTimeout(() => controller.abort(), 9000);
+    state.pubchem.statuses[target.key] = { state: 'loading', query };
+    refreshMain();
+    try {
+      const result = await fetchPubChemRecord(query, controller.signal);
+      const record = await cachePubChemRecord(query, result);
+      target.apply(record);
+      state.pubchem.statuses[target.key] = { state: 'success', query, cid: result.cid };
+      notice(`已匹配 ${result.title}（${result.formula || '无分子式'}，MW ${Core.formatNumber(result.molecularWeight)}），请核对盐型或水合物。`, 'good');
+    } catch (error) {
+      if (error?.name === 'AbortError') {
+        state.pubchem.statuses[target.key] = { state: 'error', message: '在线查询超时，请检查网络后重试。' };
+      } else {
+        state.pubchem.statuses[target.key] = { state: 'error', message: error.message || '在线查询失败。' };
+      }
+    } finally {
+      window.clearTimeout(timeout);
+      if (pubChemControllers.get(target.key) === controller) pubChemControllers.delete(target.key);
+      refreshMain();
+    }
   }
 
   function findMatchingStock(component) {
@@ -1187,7 +1409,7 @@
     const summary = String(payload.summary || payload.sourceModule || '来自 BioAssay Studio 分析模块').trim();
     const record = await saveCalculation(type, payload.input || {}, payload.result || {}, label, summary);
     record.sourceModule = String(payload.sourceModule || '').trim();
-    record.appVersion = document.documentElement.dataset.appVersion || '2.11.0';
+    record.appVersion = document.documentElement.dataset.appVersion || '2.12.0';
     await dbPut('calculations', record);
     if (state.page === 'home' || state.page === 'calculator') renderShell();
     notice(`已接收“${label}”，可在智能计算器的计算历史中重新查看。`, 'good');
@@ -1777,7 +1999,15 @@
     draft[field] = textFields.has(field) || rawValue === '' ? rawValue : Number(rawValue);
     if (state.calculatorTab === 'molarity' && field === 'chemicalName') {
       const chemical = findChemicalRecord(rawValue);
-      if (chemical) draft.molecularWeight = chemical.molecularWeight;
+      if (chemical) {
+        draft.molecularWeight = chemical.molecularWeight;
+        draft.molecularWeightSource = chemical.source === 'PubChem PUG REST' ? 'pubchem' : 'library';
+      } else if (draft.molecularWeightSource !== 'manual') {
+        draft.molecularWeight = '';
+        draft.molecularWeightSource = '';
+      }
+    } else if (state.calculatorTab === 'molarity' && field === 'molecularWeight') {
+      draft.molecularWeightSource = 'manual';
     }
   }
 
@@ -1821,6 +2051,7 @@
       if (!actionButton) return;
       const action = actionButton.dataset.elAction;
       if (action === 'cycle-theme') cycleTheme();
+      else if (action === 'lookup-pubchem') await lookupChemicalOnline(actionButton.dataset.elLookupKind, actionButton.dataset.elLookupIndex, true);
       else if (action === 'open-print') openPrintDialog(false);
       else if (action === 'print-current') openPrintDialog(true);
       else if (action === 'close-print') closePrintDialog();
@@ -1945,14 +2176,20 @@
           const chemical = findChemicalRecord(event.target.value);
           if (chemical) {
             component.molecularWeight = Number(chemical.molecularWeight) > 0 ? chemical.molecularWeight : '';
-            component.molecularWeightSource = 'library';
+            component.molecularWeightSource = chemical.source === 'PubChem PUG REST' ? 'pubchem' : 'library';
+          } else if (component.molecularWeightSource !== 'manual') {
+            component.molecularWeight = '';
+            component.molecularWeightSource = '';
           }
         }
       } else if (event.target.id === 'elSearchInput') state.searchQuery = event.target.value;
     });
 
     mount.addEventListener('change', async event => {
-      if (event.target.matches('[data-el-print-key]')) {
+      if (event.target.matches('[data-el-pubchem-toggle]')) {
+        setPubChemEnabled(event.target.checked);
+        refreshMain();
+      } else if (event.target.matches('[data-el-print-key]')) {
         const key = event.target.dataset.elPrintKey;
         const selected = new Set(state.print.selectedKeys);
         if (event.target.checked) selected.add(key);
@@ -1968,9 +2205,18 @@
       else if (event.target.id === 'elProtocolImageInput') await addAttachments(event.target.files);
       else if (event.target.id === 'elAttachmentInput') await addAttachments(event.target.files);
       else if (event.target.id === 'elBackupInput' && event.target.files[0]) await importLibrary(event.target.files[0]);
-      else if (event.target.matches('[data-el-calc-field]') && ['kind', 'chemicalName'].includes(event.target.dataset.elCalcField)) refreshMain();
-      else if (event.target.matches('[data-el-component]') && ['name', 'sourceType', 'stockId'].includes(event.target.dataset.elComponentField)) refreshMain();
-      else if (event.target.matches('[data-el-calc-component]') && ['name', 'sourceType', 'stockId'].includes(event.target.dataset.elCalcComponentField)) refreshMain();
+      else if (event.target.matches('[data-el-calc-field]') && event.target.dataset.elCalcField === 'chemicalName') {
+        await lookupChemicalOnline('molarity', '', false);
+        refreshMain();
+      } else if (event.target.matches('[data-el-calc-field]') && event.target.dataset.elCalcField === 'kind') refreshMain();
+      else if (event.target.matches('[data-el-component]') && event.target.dataset.elComponentField === 'name') {
+        await lookupChemicalOnline('recipe-component', Number(event.target.dataset.elComponent), false);
+        refreshMain();
+      } else if (event.target.matches('[data-el-component]') && ['sourceType', 'stockId'].includes(event.target.dataset.elComponentField)) refreshMain();
+      else if (event.target.matches('[data-el-calc-component]') && event.target.dataset.elCalcComponentField === 'name') {
+        await lookupChemicalOnline('calc-component', Number(event.target.dataset.elCalcComponent), false);
+        refreshMain();
+      } else if (event.target.matches('[data-el-calc-component]') && ['sourceType', 'stockId'].includes(event.target.dataset.elCalcComponentField)) refreshMain();
     });
 
     mount.addEventListener('keydown', event => {
@@ -1986,6 +2232,11 @@
 
   async function init() {
     try {
+      try {
+        state.pubchem.enabled = localStorage.getItem(PUBCHEM_ENABLED_KEY) === '1';
+      } catch (_) {
+        state.pubchem.enabled = false;
+      }
       state.db = await openDatabase();
       await loadRecords();
       await seedChemicals();
@@ -1999,6 +2250,7 @@
   }
 
   window.addEventListener('beforeunload', () => {
+    stopPubChemLookups();
     state.objectUrls.forEach(url => URL.revokeObjectURL(url));
     state.objectUrls.clear();
   });
@@ -2009,6 +2261,7 @@
 
   window.ExperimentLibraryApi = {
     importCalculation: importExternalCalculation,
+    lookupPubChem: fetchPubChemRecord,
   };
   window.ExperimentLibraryReady = true;
   initializationPromise = init();

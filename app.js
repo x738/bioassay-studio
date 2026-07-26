@@ -8,7 +8,7 @@
   const sheetDialog = $('#sheetDialog');
   const tiffPageDialog = $('#tiffPageDialog');
   const core = window.BioAssayCore;
-  const APP_VERSION = document.documentElement.dataset.appVersion || '2.11.0';
+const APP_VERSION = document.documentElement.dataset.appVersion || '2.12.0';
   const auditLog = [];
   const history = { undo: [], redo: [], applying: false, max: 50 };
   const resourcePromises = new Map();
