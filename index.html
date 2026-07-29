@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="zh-CN" data-app-version="2.12.0">
+<html lang="zh-CN" data-app-version="2.16.2">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -10,7 +10,7 @@
     <link rel="icon" href="icon.svg" type="image/svg+xml" />
     <link rel="manifest" href="manifest.webmanifest" />
     <title>BioAssay Studio | 科研数据与实验知识库</title>
-    <link rel="stylesheet" href="styles.css?v=2.12.0" />
+<link rel="stylesheet" href="styles.css?v=2.16.2" />
   </head>
   <body>
     <header class="app-header">
@@ -47,7 +47,11 @@
             <h2 id="qpcrTitle">qPCR ΔΔCt 分析</h2>
             <p>导入 Ct/Cq 数据，完成质控、内参与对照组设置，并生成相对表达结果。</p>
           </div>
-          <button id="loadDemoQpcr" class="button button-secondary">载入示例数据</button>
+          <div class="qpcr-intro-actions">
+            <button id="restartQpcrAnalysis" class="button button-ghost">重新导入</button>
+            <button id="loadDemoQpcr" class="button button-ghost">简化示例</button>
+            <button id="loadRenQpcrDemo" class="button button-secondary">载入 96 孔教学示例</button>
+          </div>
         </div>
 
         <ol class="wizard" aria-label="qPCR 分析步骤">
@@ -117,6 +121,19 @@
                   <button id="editWbGuide" type="button">绘制引导搜索区</button>
                   <button id="clearWbGuide" type="button" disabled>清除引导区</button>
                   <span id="wbGuideNote">可先框住目标条带所在膜区域，再在该区域内自动识别。</span>
+                </div>
+                <div class="wb-line-guide-card">
+                  <div class="wb-line-guide-heading">
+                    <div><strong>沿线识别（推荐）</strong><span>从最左条带中心拖到最右条带中心；宽带内部多个峰仍按一个完整条带处理。</span></div>
+                    <span class="pill info">ImageJ 思路</span>
+                  </div>
+                  <div class="wb-line-guide-actions">
+                    <button id="addWbLineGuide" type="button">绘制条带中心线</button>
+                    <button id="clearWbLineGuides" type="button" disabled>清除中心线</button>
+                    <label>搜索带宽（px）<input id="wbLineGuideWidth" type="number" min="6" max="160" step="2" value="28" /></label>
+                  </div>
+                  <button id="detectWbFromLines" class="button button-secondary" type="button" disabled>按中心线识别完整条带</button>
+                  <p id="wbLineGuideNote">单排条带画一条线；上下多排条带可分别画多条线后一次识别。</p>
                 </div>
                 <label>识别灵敏度 <span class="range-value" id="autoSensitivityValue">65</span>
                   <input id="autoSensitivity" type="range" min="35" max="90" value="65" />
@@ -548,7 +565,7 @@
     </main>
 
     <footer class="app-footer">
-        <div><strong>BioAssay Studio v2.12.0</strong><span>科研数据与实验知识库均在本机处理，网站不接收上传内容。</span></div>
+<div><strong>BioAssay Studio v2.16.2</strong><span>科研数据与实验知识库均在本机处理，网站不接收上传内容。</span></div>
       <nav aria-label="网站信息"><a href="privacy.html">隐私与数据处理</a><a href="THIRD_PARTY_NOTICES.txt">第三方许可</a><a href="README.md">使用说明</a></nav>
     </footer>
 
@@ -571,8 +588,8 @@
     </dialog>
 
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
-  <script src="analysis-core.js?v=2.12.0"></script>
+<script src="analysis-core.js?v=2.16.2"></script>
     <script src="vendor/chart.umd.js"></script>
-  <script src="app.js?v=2.12.0"></script>
+<script src="app.js?v=2.16.2"></script>
   </body>
 </html>

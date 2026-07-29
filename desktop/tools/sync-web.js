@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 
 const desktopRoot = path.resolve(__dirname, '..');
-const sourceRoot = path.resolve(desktopRoot, '..');
+const sourceRoot = path.resolve(desktopRoot, '..', '..', 'outputs', 'bioassay-studio');
 const targetRoot = path.join(desktopRoot, 'web');
 const include = [
   '.nojekyll',
