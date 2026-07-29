@@ -389,6 +389,171 @@
     };
   }
 
+  function detectLineBands(profile, options = {}) {
+    const values = Array.from(profile || [], value => Number(value));
+    const length = values.length;
+    if (length < 5 || values.some(value => !Number.isFinite(value))) {
+      return { segments: [], baseline: [], residual: [], highThreshold: NaN, lowThreshold: NaN, noise: NaN };
+    }
+    const sensitivity = Math.max(1, Math.min(100, Number(options.sensitivity) || 65));
+    const smoothRadius = Math.max(1, Math.min(9, Math.round(Number(options.smoothRadius) || length * 0.004)));
+    const smooth = source => {
+      const prefix = [0];
+      source.forEach(value => prefix.push(prefix[prefix.length - 1] + value));
+      return source.map((_, index) => {
+        const start = Math.max(0, index - smoothRadius);
+        const end = Math.min(length - 1, index + smoothRadius);
+        return (prefix[end + 1] - prefix[start]) / (end - start + 1);
+      });
+    };
+    const smoothed = smooth(values);
+    // The hand-drawn strip is a lane profile, not a generic texture scan.
+    // Use a deliberately broad background window so one wide physical band is
+    // not converted into several local residual peaks.
+    const baselineRadius = Math.max(9, Math.min(Math.floor(length / 3), Math.round(Number(options.baselineRadius) || length * 0.32)));
+    const baseline = smoothed.map((_, index) => {
+      const start = Math.max(0, index - baselineRadius);
+      const end = Math.min(length - 1, index + baselineRadius);
+      const window = smoothed.slice(start, end + 1).sort((a, b) => a - b);
+      return window[Math.max(0, Math.min(window.length - 1, Math.floor(window.length * 0.22)))];
+    });
+    const residual = smooth(smoothed.map((value, index) => Math.max(0, value - baseline[index])));
+    const sortedResidual = residual.slice().sort((a, b) => a - b);
+    const quiet = sortedResidual.slice(0, Math.max(3, Math.floor(length * 0.55)));
+    const quietMedian = median(quiet);
+    const noise = Math.max(1e-9, median(quiet.map(value => Math.abs(value - quietMedian))) * 1.4826);
+    const peak = sortedResidual[Math.max(0, Math.min(length - 1, Math.floor(length * 0.995)))];
+    const highFraction = 0.052 - sensitivity * 0.00028;
+    const lowFraction = 0.014 - sensitivity * 0.000055;
+    const highThreshold = Math.max(noise * (2.45 - sensitivity * 0.009), peak * Math.max(0.018, highFraction));
+    const lowThreshold = Math.max(noise * 0.72, peak * Math.max(0.006, lowFraction));
+    const minimumWidth = Math.max(2, Math.round(Number(options.minimumWidth) || length * 0.004));
+    const mergeGap = Math.max(2, Math.round(Number(options.mergeGap) || length * 0.012));
+    const padding = Math.max(1, Math.round(Number(options.padding) || length * 0.0035));
+    const seeds = [];
+    let start = -1;
+    residual.forEach((value, index) => {
+      if (value >= highThreshold && start < 0) start = index;
+      if ((value < highThreshold || index === length - 1) && start >= 0) {
+        const end = value >= highThreshold && index === length - 1 ? index : index - 1;
+        seeds.push({ start, end });
+        start = -1;
+      }
+    });
+    const expanded = seeds.map(seed => {
+      let left = seed.start;
+      let right = seed.end;
+      while (left > 0 && residual[left - 1] >= lowThreshold) left -= 1;
+      while (right < length - 1 && residual[right + 1] >= lowThreshold) right += 1;
+      return { start: left, end: right };
+    });
+    const sortedSmoothed = smoothed.slice().sort((a, b) => a - b);
+    const rawFloor = sortedSmoothed[Math.max(0, Math.floor(length * 0.12))];
+    const merged = [];
+    expanded.forEach(segment => {
+      const previous = merged[merged.length - 1];
+      if (!previous) {
+        merged.push({ ...segment });
+        return;
+      }
+      const gap = segment.start - previous.end - 1;
+      const valley = gap > 0 ? Math.min(...residual.slice(previous.end + 1, segment.start)) : Infinity;
+      const previousPeak = Math.max(...residual.slice(previous.start, previous.end + 1));
+      const nextPeak = Math.max(...residual.slice(segment.start, segment.end + 1));
+      const relativeValley = valley / Math.max(1e-9, Math.min(previousPeak, nextPeak));
+      const rawValley = gap > 0 ? Math.min(...smoothed.slice(previous.end + 1, segment.start)) : Infinity;
+      const rawPreviousPeak = Math.max(...smoothed.slice(previous.start, previous.end + 1));
+      const rawNextPeak = Math.max(...smoothed.slice(segment.start, segment.end + 1));
+      const relativeRawValley = (rawValley - rawFloor) / Math.max(1e-9, Math.min(rawPreviousPeak, rawNextPeak) - rawFloor);
+      // A wide physical band often contains two local maxima. Merge the
+      // maxima when the low-threshold shoulders touch, or when only a short,
+      // shallow valley separates them. True adjacent lanes normally return
+      // to the local membrane baseline and therefore remain separate.
+      if (gap <= Math.max(1, minimumWidth - 1)
+        || (gap <= mergeGap && (relativeValley >= 0.13 || relativeRawValley >= 0.28))) previous.end = Math.max(previous.end, segment.end);
+      else merged.push({ ...segment });
+    });
+    // A WB lane is an integrated area, not a collection of local maxima.
+    // Splitting a connected signal merely because it has two dark cores was
+    // the main cause of one broad physical band becoming L1/L2.  Composite
+    // splitting is therefore opt-in and is only useful for deliberately
+    // resolving two bands that overlap along the same hand-drawn line.
+    const allowCompositeSplitting = options.allowCompositeSplitting === true;
+    const splitValleyRatio = Math.max(0.05, Math.min(0.6, Number(options.splitValleyRatio) || 0.16));
+    const minimumPartWidth = Math.max(minimumWidth * 2, Math.round(length * 0.022));
+    const splitComposite = (segment, depth = 0) => {
+      const width = segment.end - segment.start + 1;
+      if (depth >= 8 || width < minimumPartWidth * 2 + 1) return [segment];
+      let best = null;
+      const start = segment.start + minimumPartWidth;
+      const end = segment.end - minimumPartWidth;
+      for (let index = start; index <= end; index += 1) {
+        if (smoothed[index] > smoothed[index - 1] || smoothed[index] > smoothed[index + 1]) continue;
+        const leftPeak = Math.max(...smoothed.slice(segment.start, index));
+        const rightPeak = Math.max(...smoothed.slice(index + 1, segment.end + 1));
+        const smallerPeak = Math.min(leftPeak, rightPeak);
+        const peakHeight = smallerPeak - rawFloor;
+        if (peakHeight <= Math.max(1e-9, noise * 1.5)) continue;
+        const ratio = (smoothed[index] - rawFloor) / peakHeight;
+        const balance = Math.min(index - segment.start, segment.end - index)
+          / Math.max(index - segment.start, segment.end - index);
+        const score = ratio + (1 - balance) * 0.035;
+        if (!best || score < best.score) best = { index, ratio, score };
+      }
+      if (!best || best.ratio > splitValleyRatio) return [segment];
+      let valleyLeft = best.index;
+      let valleyRight = best.index;
+      const valleyLimit = smoothed[best.index] + Math.max(0.5, (Math.min(
+        Math.max(...smoothed.slice(segment.start, best.index)),
+        Math.max(...smoothed.slice(best.index + 1, segment.end + 1)),
+      ) - smoothed[best.index]) * 0.08);
+      while (valleyLeft > segment.start + minimumPartWidth && smoothed[valleyLeft - 1] <= valleyLimit) valleyLeft -= 1;
+      while (valleyRight < segment.end - minimumPartWidth && smoothed[valleyRight + 1] <= valleyLimit) valleyRight += 1;
+      const left = { start: segment.start, end: Math.max(segment.start, valleyLeft - 1) };
+      const right = { start: Math.min(segment.end, valleyRight + 1), end: segment.end };
+      return [...splitComposite(left, depth + 1), ...splitComposite(right, depth + 1)];
+    };
+    const separated = allowCompositeSplitting
+      ? merged.flatMap(segment => splitComposite(segment))
+      : merged;
+    let segments = separated.map(segment => {
+      const signalStart = segment.start;
+      const signalEnd = segment.end;
+      const local = residual.slice(signalStart, signalEnd + 1);
+      const localPeak = Math.max(...local);
+      const area = local.reduce((sum, value) => sum + value, 0);
+      const weights = local.map(value => Math.max(0, value - lowThreshold * 0.35));
+      const weightTotal = weights.reduce((sum, value) => sum + value, 0);
+      const center = weightTotal > 0
+        ? signalStart + weights.reduce((sum, value, index) => sum + value * index, 0) / weightTotal
+        : (signalStart + signalEnd) / 2;
+      const confidence = Math.max(0, Math.min(1,
+        (1 - Math.exp(-localPeak / Math.max(noise * 5, 1e-9)))
+        * Math.min(1, area / Math.max(noise * Math.max(minimumWidth, local.length) * 5, 1e-9))));
+      return {
+        start: Math.max(0, signalStart - padding),
+        end: Math.min(length - 1, signalEnd + padding),
+        signalStart,
+        signalEnd,
+        center,
+        peak: localPeak,
+        area,
+        confidence,
+      };
+    }).filter(segment => segment.signalEnd - segment.signalStart + 1 >= minimumWidth
+      && segment.peak >= highThreshold
+      && segment.area >= noise * Math.max(minimumWidth, segment.signalEnd - segment.signalStart + 1) * 1.08);
+    const expectedCount = Math.max(0, Math.round(Number(options.expectedCount) || 0));
+    if (expectedCount && segments.length > expectedCount) {
+      segments = segments
+        .slice()
+        .sort((left, right) => (right.area * (0.6 + right.confidence)) - (left.area * (0.6 + left.confidence)))
+        .slice(0, expectedCount)
+        .sort((left, right) => left.center - right.center);
+    }
+    return { segments, baseline, residual, highThreshold, lowThreshold, noise };
+  }
+
   function separateNeighborRois(rois, minimumWidth = 4) {
     const selected = (rois || []).map(roi => ({ ...roi })).sort((a, b) => (a.x + a.width / 2) - (b.x + b.width / 2));
     selected.forEach((candidate, index) => {
@@ -549,6 +714,7 @@
     classifySaturation,
     coomassieSampleResult,
     dpiToPixelsPerMeter,
+    detectLineBands,
     editLaneAnnotations,
     filterBandGeometryOutliers,
     figureFramePlacement,

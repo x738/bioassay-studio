@@ -59,6 +59,12 @@
       enabled: false,
       statuses: {},
     },
+    componentImport: {
+      open: false,
+      target: 'recipe',
+      text: '',
+      error: '',
+    },
     print: {
       open: false,
       selectedKeys: [],
@@ -179,6 +185,14 @@
       return [storeName, records.map(({ blob, ...metadata }) => metadata)];
     }));
     state.records = Object.fromEntries(entries);
+    state.records.recipes.forEach(recipe => {
+      recipe.experimentType = String(recipe.experimentType || '').trim();
+      recipe.application = String(recipe.application || '').trim();
+      recipe.purpose = String(recipe.purpose || '').trim();
+    });
+    state.records.protocols.forEach(protocol => {
+      protocol.linkedRecipeIds = [...new Set(Array.isArray(protocol.linkedRecipeIds) ? protocol.linkedRecipeIds.filter(Boolean) : [])];
+    });
     Object.values(state.records).forEach(list => list.sort((a, b) => String(b.updatedAt || b.createdAt || '').localeCompare(String(a.updatedAt || a.createdAt || ''))));
   }
 
@@ -267,8 +281,38 @@
     }, new Map());
   }
 
+  function recipeContext(recipe) {
+    const experimentType = String(recipe?.experimentType || '通用实验').trim() || '通用实验';
+    const category = String(recipe?.category || '未分类配方').trim() || '未分类配方';
+    const application = String(recipe?.application || recipe?.purpose || '').trim();
+    return { experimentType, category, application };
+  }
+
+  function renderRecipeTreeGroups(list) {
+    const systems = list.reduce((map, recipe) => {
+      const context = recipeContext(recipe);
+      if (!map.has(context.experimentType)) map.set(context.experimentType, new Map());
+      const categories = map.get(context.experimentType);
+      if (!categories.has(context.category)) categories.set(context.category, []);
+      categories.get(context.category).push(recipe);
+      return map;
+    }, new Map());
+    if (!systems.size) return '<p class="el-empty-tree">暂无记录</p>';
+    return [...systems.entries()].map(([experimentType, categories]) => `
+      <details class="el-tree-system" open>
+        <summary>${escapeHtml(experimentType)} <small>${[...categories.values()].reduce((sum, items) => sum + items.length, 0)}</small></summary>
+        ${[...categories.entries()].map(([category, items]) => `
+          <details class="el-tree-category" open>
+            <summary>${escapeHtml(category)} <small>${items.length}</small></summary>
+            ${items.map(item => {
+              const context = recipeContext(item);
+              return `<button type="button" class="el-tree-item ${state.selection?.id === item.id ? 'active' : ''}" data-el-open="recipes" data-el-id="${item.id}" title="${escapeAttr([item.name, context.application].filter(Boolean).join(' · '))}"><span>${item.favorite ? '★' : ''} ${escapeHtml(item.name || '未命名')}</span><small>${context.application ? escapeHtml(context.application) : `v${item.version || 1}`}</small></button>`;
+            }).join('')}
+          </details>`).join('')}
+      </details>`).join('');
+  }
+
   function renderTree() {
-    const recipeGroups = groupByCategory(state.records.recipes);
     const protocolGroups = groupByCategory(state.records.protocols);
     const section = (title, store, groups) => `
       <section class="el-tree-section">
@@ -281,7 +325,10 @@
         `).join('') : '<p class="el-empty-tree">暂无记录</p>'}
       </section>`;
     return [
-      section('配方目录', 'recipes', recipeGroups),
+      `<section class="el-tree-section">
+        <div class="el-tree-title"><span>配方目录</span><button type="button" data-el-new="recipes" title="新建配方">＋</button></div>
+        ${renderRecipeTreeGroups(state.records.recipes)}
+      </section>`,
       section('实验方法', 'protocols', protocolGroups),
       `<section class="el-tree-section"><div class="el-tree-title"><span>母液库</span><button type="button" data-el-new="stocks" title="新建母液">＋</button></div>
         ${state.records.stocks.length ? state.records.stocks.map(item => `<button type="button" class="el-tree-item ${state.selection?.id === item.id ? 'active' : ''}" data-el-open="stocks" data-el-id="${item.id}"><span>${escapeHtml(item.name || '未命名母液')}</span><small>${escapeHtml(String(item.concentration || ''))} ${escapeHtml(item.unit || '')}</small></button>`).join('') : '<p class="el-empty-tree">暂无母液</p>'}
@@ -318,20 +365,32 @@
           <div id="elTree" class="el-tree">${renderTree()}</div>
         </aside>
         <section id="elMain" class="el-main">${renderMain()}</section>
-        <aside id="elProperties" class="el-properties">${renderProperties()}</aside>
       </div>
       <datalist id="elChemicalOptions">${chemicalOptionsMarkup()}</datalist>
-      ${renderPrintDialog()}`;
+      ${renderPrintDialog()}
+      ${renderComponentImportDialog()}`;
     setTheme(localStorage.getItem('bioassay-experiment-theme') || 'system');
     queueMicrotask(() => { hydrateSelectedProtocolImages().catch(console.error); });
   }
 
   function renderMain() {
     const record = selectedRecord();
-    if (record && state.selection.store === 'recipes') return renderRecipeEditor(record);
-    if (record && state.selection.store === 'protocols') return renderProtocolEditor(record);
-    if (record && state.selection.store === 'stocks') return renderStockEditor(record);
-    if (record && state.selection.store === 'ocrRecords') return renderOcrEditor(record);
+    if (record) {
+      const editor = state.selection.store === 'recipes'
+        ? renderRecipeEditor(record)
+        : state.selection.store === 'protocols'
+          ? renderProtocolEditor(record)
+          : state.selection.store === 'stocks'
+            ? renderStockEditor(record)
+            : renderOcrEditor(record);
+      return `<div class="el-record-workspace">
+        <details class="el-inline-properties">
+          <summary><span>记录属性、分类与附件</span><small>自动保存 · v${record.version || 1}</small></summary>
+          <div class="el-inline-properties-body">${renderProperties()}</div>
+        </details>
+        <div class="el-record-editor">${editor}</div>
+      </div>`;
+    }
     if (state.page === 'home') return renderHome();
     if (state.page === 'recipes') return renderRecipeLibrary();
     if (state.page === 'protocols') return renderProtocolLibrary();
@@ -354,12 +413,18 @@
     }
     const ownerKey = `${state.selection.store}:${record.id}`;
     const attachments = state.records.attachments.filter(item => item.ownerKey === ownerKey);
+    const recipeClassification = state.selection.store === 'recipes' ? `
+      <div class="el-property-classification">
+        <label>实验体系<input data-el-field="experimentType" value="${escapeAttr(record.experimentType || '')}" placeholder="如：Co-IP / Western blot" /></label>
+        <label>配方类型<input data-el-field="category" value="${escapeAttr(record.category || '')}" placeholder="如：裂解液 / 洗涤液" /></label>
+        <label>用途版本<input data-el-field="application" value="${escapeAttr(record.application || '')}" placeholder="如：弱相互作用保留" /></label>
+      </div>` : `<label>分类<input data-el-field="category" value="${escapeAttr(record.category || '')}" placeholder="如：蛋白实验 / 分子生物学" /></label>`;
     return `
       <div class="el-properties-head">
         <span>${recordLabel(state.selection.store)}属性</span>
         <button type="button" data-el-action="toggle-favorite" class="${record.favorite ? 'active' : ''}">${record.favorite ? '★ 已收藏' : '☆ 收藏'}</button>
       </div>
-      <label>分类<input data-el-field="category" value="${escapeAttr(record.category || '')}" placeholder="如：Buffer / 蛋白提取" /></label>
+      ${recipeClassification}
       <label>标签（逗号分隔）<input data-el-field="tags" value="${escapeAttr((record.tags || []).join(', '))}" placeholder="如：WB, 蛋白, 4℃" /></label>
       <label>备注<textarea data-el-field="notes" rows="5" placeholder="记录适用范围、替代条件或经验">${escapeHtml(record.notes || '')}</textarea></label>
       <div class="el-property-grid">
@@ -415,9 +480,13 @@
   }
 
   function recordListButton(item, store) {
+    const context = store === 'recipes' ? recipeContext(item) : null;
+    const description = context
+      ? `${context.experimentType} › ${context.category}${context.application ? ` · ${context.application}` : ''}`
+      : `${item.category || '未分类'} · ${dateText(item.updatedAt)}`;
     return `<button type="button" class="el-record-row" data-el-open="${store}" data-el-id="${item.id}">
       <span class="el-record-icon">${store === 'recipes' ? 'R' : store === 'protocols' ? 'P' : 'S'}</span>
-      <span><b>${escapeHtml(item.name || item.title || '未命名')}</b><small>${escapeHtml(item.category || '未分类')} · ${escapeHtml(dateText(item.updatedAt))}</small></span>
+      <span><b>${escapeHtml(item.name || item.title || '未命名')}</b><small>${escapeHtml(description)}</small></span>
       <i>›</i>
     </button>`;
   }
@@ -534,14 +603,20 @@
         <div><span>实验配方 · v${recipe.version || 1}</span><input class="el-title-input" data-el-field="name" value="${escapeAttr(recipe.name || '')}" placeholder="配方名称" /></div>
         <div><button type="button" data-el-action="print-current">打印预览</button><button type="button" data-el-action="copy-recipe">复制表格</button><button type="button" class="primary" data-el-action="recalculate-recipe">重新计算</button></div>
       </div>
+      <div class="el-recipe-context-banner">
+        <div><span>实验体系</span><b>${escapeHtml(recipe.experimentType || '通用实验')}</b></div>
+        <div><span>配方类型</span><b>${escapeHtml(recipe.category || '未分类配方')}</b></div>
+        <div><span>用途版本</span><b>${escapeHtml(recipe.application || '尚未注明')}</b></div>
+        <p>同一实验体系可以保存多套用途不同的配方；请在上方“记录属性”中明确分类，避免混用。</p>
+      </div>
       <div class="el-recipe-meta-grid">
         <label>目标体积<div class="el-inline-field"><input data-el-field="targetVolume" type="number" min="0.000001" step="any" value="${escapeAttr(recipe.targetVolume || '')}" /><select data-el-field="targetVolumeUnit">${['mL', 'L', 'µL'].map(unit => `<option ${recipe.targetVolumeUnit === unit ? 'selected' : ''}>${unit}</option>`).join('')}</select></div></label>
         <label>目标 pH<input data-el-field="targetPh" value="${escapeAttr(recipe.targetPh || '')}" placeholder="如：7.5" /></label>
         <label>保存条件<input data-el-field="storage" value="${escapeAttr(recipe.storage || '')}" placeholder="如：4℃，1 个月" /></label>
-        <label>用途<input data-el-field="purpose" value="${escapeAttr(recipe.purpose || '')}" placeholder="此配方用于什么实验" /></label>
+        <label>详细用途与条件<input data-el-field="purpose" value="${escapeAttr(recipe.purpose || '')}" placeholder="样本、目的、严格度及不适用条件" /></label>
       </div>
       <section class="el-editor-section">
-        <div class="el-section-title"><div><h4>配方组成</h4><p>“自动选择”会优先调用同名母液；没有母液时按分子量称量。</p></div><button type="button" data-el-action="add-component">＋ 添加成分</button></div>
+        <div class="el-section-title"><div><h4>配方组成</h4><p>可直接粘贴 Excel / WPS 表格；系统会识别浓度、单位和分子量并立即计算。</p></div><div class="el-section-actions"><button type="button" data-el-action="open-component-import" data-el-import-target="recipe">从表格粘贴</button><button type="button" data-el-action="add-component">＋ 添加成分</button></div></div>
         ${renderPubChemAccessPanel()}
         <div class="el-table-wrap">
           <table class="el-recipe-table">
@@ -585,6 +660,7 @@
         <label>实验目的<textarea data-el-field="purpose" rows="3" placeholder="说明实验要回答的问题">${escapeHtml(protocol.purpose || '')}</textarea></label>
         <label>实验材料<textarea data-el-field="materials" rows="3" placeholder="试剂、样本、耗材和仪器">${escapeHtml(protocol.materials || '')}</textarea></label>
       </div>
+      ${renderProtocolRecipeLinks(protocol)}
       ${protocol.preview ? `<article class="el-markdown-preview">${renderMarkdown(protocol.markdown || '')}</article>` : `<label class="el-markdown-editor">实验步骤（Markdown）<textarea data-el-field="markdown" rows="18" placeholder="# 实验步骤&#10;&#10;1. 准备样品&#10;2. ...">${escapeHtml(protocol.markdown || '')}</textarea></label>`}
       <section class="el-editor-section el-protocol-media">
         <div class="el-section-title"><div><h4>实验截图与原始资料</h4><p>截图会作为当前实验方法的本地附件保存，刷新或重启后仍可查看。</p></div><label class="el-file-button">＋ 添加截图<input id="elProtocolImageInput" type="file" accept="image/*" multiple /></label></div>
@@ -597,6 +673,175 @@
         <label>常见问题<textarea data-el-field="troubleshooting" rows="5">${escapeHtml(protocol.troubleshooting || '')}</textarea></label>
         <label class="wide">参考文献<textarea data-el-field="references" rows="4" placeholder="DOI、网页、论文或实验室来源">${escapeHtml(protocol.references || '')}</textarea></label>
       </div>`;
+  }
+
+  function renderProtocolRecipeLinks(protocol) {
+    const linkedIds = Array.isArray(protocol.linkedRecipeIds) ? protocol.linkedRecipeIds : [];
+    const linked = linkedIds.map(id => state.records.recipes.find(recipe => recipe.id === id)).filter(Boolean);
+    const available = state.records.recipes.filter(recipe => !linkedIds.includes(recipe.id));
+    const options = available.map(recipe => {
+      const context = recipeContext(recipe);
+      return `<option value="${recipe.id}">${escapeHtml(`${recipe.name} · ${context.experimentType} / ${context.category}${context.application ? ` / ${context.application}` : ''}`)}</option>`;
+    }).join('');
+    return `<section class="el-editor-section el-protocol-recipes">
+      <div class="el-section-title">
+        <div><h4>本方法调用的实验配方</h4><p>插入后直接显示配方用途与实际加入量；配方更新时方法中的引用同步更新。</p></div>
+        <div class="el-protocol-recipe-picker">
+          <select id="elProtocolRecipeSelect" ${available.length ? '' : 'disabled'}>
+            ${available.length ? `<option value="">选择要插入的配方</option>${options}` : '<option value="">没有其他可用配方</option>'}
+          </select>
+          <button type="button" data-el-action="insert-selected-recipe" ${available.length ? '' : 'disabled'}>插入配方</button>
+        </div>
+      </div>
+      <div class="el-linked-recipe-list">
+        ${linked.length ? linked.map(renderLinkedRecipeCard).join('') : '<div class="el-empty-state compact"><b>尚未调用配方</b><span>例如在 Co-IP 方法中分别插入“弱相互作用裂解液”和“高严格度洗涤液”。</span></div>'}
+      </div>
+    </section>`;
+  }
+
+  function renderLinkedRecipeCard(recipe) {
+    const context = recipeContext(recipe);
+    const components = (recipe.components || []).map(component => {
+      const amount = Core.formatQuantity(component.actualAmount);
+      return `<li><span>${escapeHtml(component.name || '未命名成分')}</span><b>${escapeHtml(amount || `${component.targetValue || '—'} ${component.targetUnit || ''}`)}</b></li>`;
+    }).join('');
+    return `<article class="el-linked-recipe-card">
+      <header>
+        <div><span>${escapeHtml(context.experimentType)} / ${escapeHtml(context.category)}</span><h5>${escapeHtml(recipe.name || '未命名配方')}</h5><p>${escapeHtml(context.application || recipe.purpose || '未注明具体用途')}</p></div>
+        <button type="button" data-el-action="remove-linked-recipe" data-el-id="${recipe.id}">移除</button>
+      </header>
+      <div class="el-linked-recipe-meta"><span>${escapeHtml(`${recipe.targetVolume || '—'} ${recipe.targetVolumeUnit || ''}`)}</span><span>v${recipe.version || 1}</span><button type="button" data-el-open="recipes" data-el-id="${recipe.id}">打开配方</button></div>
+      <ul>${components || '<li><span>尚未填写组成</span><b>—</b></li>'}</ul>
+    </article>`;
+  }
+
+  function normalizeImportHeader(value) {
+    return String(value || '').trim().toLowerCase().replace(/[\s()（）_\-\/]/g, '');
+  }
+
+  function splitPastedRow(line) {
+    if (line.includes('\t')) return line.split('\t');
+    if (line.includes(',')) return line.split(',');
+    return line.trim().split(/\s{2,}/);
+  }
+
+  function parseConcentration(value, fallbackUnit = '') {
+    const text = String(value ?? '').trim().replace(/μ/g, 'µ');
+    const match = text.match(/(-?\d+(?:\.\d+)?(?:e[+-]?\d+)?)\s*(mM|M|µM|%\s*\(w\/v\)|%\s*\(v\/v\)|%)/i);
+    if (!match) {
+      const numeric = Number(text);
+      return { value: Number.isFinite(numeric) ? numeric : '', unit: fallbackUnit || 'mM' };
+    }
+    let unit = match[2].replace(/\s+/g, '');
+    if (unit === '%') unit = '% (w/v)';
+    if (/^mm$/i.test(unit)) unit = 'mM';
+    else if (/^m$/i.test(unit)) unit = 'M';
+    else if (/^µm$/i.test(unit)) unit = 'µM';
+    else if (/w\/v/i.test(unit)) unit = '% (w/v)';
+    else if (/v\/v/i.test(unit)) unit = '% (v/v)';
+    return { value: Number(match[1]), unit };
+  }
+
+  function parseComponentTable(text) {
+    const rows = String(text || '')
+      .split(/\r?\n/)
+      .map(line => splitPastedRow(line).map(cell => String(cell || '').trim()))
+      .filter(row => row.some(Boolean));
+    if (!rows.length) throw new Error('没有读取到可导入的数据行。');
+
+    const headerTokens = rows[0].map(normalizeImportHeader);
+    const headerWords = ['成分', '试剂', '名称', '最终浓度', '目标浓度', '浓度', '单位', '分子量', 'mw', '来源', '母液'];
+    const hasHeader = headerTokens.some(token => headerWords.some(word => token.includes(normalizeImportHeader(word))));
+    const header = hasHeader ? headerTokens : [];
+    const dataRows = hasHeader ? rows.slice(1) : rows;
+    const findIndex = words => header.findIndex(token => words.some(word => token.includes(normalizeImportHeader(word))));
+    const nameIndex = hasHeader ? findIndex(['成分', '试剂名称', '试剂', '名称']) : 0;
+    const concentrationIndex = hasHeader ? findIndex(['最终浓度', '目标浓度', '终浓度', '浓度']) : 1;
+    const unitIndex = hasHeader ? findIndex(['浓度单位', '单位']) : 2;
+    const mwIndex = hasHeader ? findIndex(['分子量', 'molecularweight', 'mw']) : 3;
+    const sourceIndex = hasHeader ? findIndex(['来源', '母液', 'stock']) : -1;
+
+    const components = dataRows.map(row => {
+      const name = String(row[Math.max(0, nameIndex)] || '').trim();
+      if (!name || /^(配制步骤|步骤|step)$/i.test(name)) return null;
+      const fallbackUnit = unitIndex >= 0 ? row[unitIndex] : '';
+      const concentration = parseConcentration(concentrationIndex >= 0 ? row[concentrationIndex] : '', fallbackUnit);
+      const manualMw = mwIndex >= 0 ? Number(String(row[mwIndex] || '').replace(/[^\d.eE+-]/g, '')) : NaN;
+      const chemical = findChemicalRecord(name);
+      const sourceText = sourceIndex >= 0 ? String(row[sourceIndex] || '') : '';
+      return {
+        id: uid('component'),
+        name,
+        targetValue: concentration.value,
+        targetUnit: concentration.unit,
+        sourceType: /母液|stock/i.test(sourceText) ? 'stock' : 'auto',
+        stockId: '',
+        molecularWeight: Number.isFinite(manualMw) && manualMw > 0 ? manualMw : Number(chemical?.molecularWeight) || '',
+        molecularWeightSource: Number.isFinite(manualMw) && manualMw > 0 ? 'manual' : chemical ? 'library' : '',
+      };
+    }).filter(Boolean);
+    if (!components.length) throw new Error('没有识别到配方成分，请确认至少包含“成分”和“最终浓度”。');
+    return components;
+  }
+
+  function openComponentImport(target) {
+    state.componentImport = { open: true, target: target === 'recipe' ? 'recipe' : 'calculator', text: '', error: '' };
+    renderShell();
+    queueMicrotask(() => document.getElementById('elComponentImportText')?.focus());
+  }
+
+  function closeComponentImport() {
+    state.componentImport = { ...state.componentImport, open: false, error: '' };
+    renderShell();
+  }
+
+  async function confirmComponentImport() {
+    try {
+      const components = parseComponentTable(state.componentImport.text);
+      if (state.componentImport.target === 'recipe') {
+        const recipe = selectedRecord();
+        if (!recipe || state.selection?.store !== 'recipes') throw new Error('当前没有打开实验配方。');
+        recipe.components = components;
+        await dbPut('recipes', recipe);
+        state.componentImport.open = false;
+        await recalculateRecipe(true);
+        notice(`已整理并计算 ${components.length} 个配方成分。`, 'good');
+      } else {
+        state.calculatorDraft.buffer.components = components;
+        state.componentImport.open = false;
+        state.calculatorTab = 'buffer';
+        await calculateCurrent();
+        notice(`已整理并计算 ${components.length} 个 Buffer 成分。`, 'good');
+      }
+      renderShell();
+    } catch (error) {
+      state.componentImport.error = error.message || '表格导入失败。';
+      renderShell();
+      queueMicrotask(() => document.getElementById('elComponentImportText')?.focus());
+    }
+  }
+
+  function renderComponentImportDialog() {
+    if (!state.componentImport.open) return '';
+    const recipeTarget = state.componentImport.target === 'recipe';
+    return `<div class="el-import-overlay" role="dialog" aria-modal="true" aria-label="从表格导入配方">
+      <div class="el-import-dialog">
+        <header>
+          <div><span>TABLE IMPORT</span><h3>${recipeTarget ? '粘贴并整理当前实验配方' : '粘贴并计算多组分 Buffer'}</h3><p>支持 Excel、WPS、CSV 或制表符文本。系统自动识别表头、补全本地分子量并计算实际加入量。</p></div>
+          <button type="button" data-el-action="close-component-import" aria-label="关闭">×</button>
+        </header>
+        <div class="el-import-example">
+          <b>推荐表头</b>
+          <code>成分　最终浓度　单位　分子量</code>
+          <span>也支持把“50 mM”放在同一单元格；分子量可留空。</span>
+        </div>
+        <label>粘贴表格
+          <textarea id="elComponentImportText" data-el-import-text rows="12" placeholder="成分&#9;最终浓度&#9;单位&#9;分子量&#10;HEPES&#9;50&#9;mM&#9;238.30&#10;NaCl&#9;150&#9;mM&#9;58.44">${escapeHtml(state.componentImport.text)}</textarea>
+        </label>
+        ${state.componentImport.error ? `<p class="el-import-error">${escapeHtml(state.componentImport.error)}</p>` : ''}
+        <footer><button type="button" data-el-action="close-component-import">取消</button><button type="button" class="primary" data-el-action="confirm-component-import">导入并计算</button></footer>
+      </div>
+    </div>`;
   }
 
   function renderMarkdown(source) {
@@ -696,11 +941,13 @@
     const steps = (recipe.steps || []).filter(step => String(step || '').trim());
     return `
       ${renderPrintMetadata([
+        ['实验体系', recipe.experimentType],
+        ['配方类型', recipe.category],
+        ['用途版本', recipe.application],
         ['用途', recipe.purpose],
         ['目标体积', `${recipe.targetVolume || '—'} ${recipe.targetVolumeUnit || ''}`],
         ['目标 pH', recipe.targetPh],
         ['保存条件', recipe.storage],
-        ['分类', recipe.category],
         ['标签', (recipe.tags || []).join('、')],
       ])}
       <section class="el-print-section">
@@ -719,6 +966,15 @@
   }
 
   function renderProtocolPrint(protocol) {
+    const linkedRecipes = (protocol.linkedRecipeIds || []).map(id => state.records.recipes.find(recipe => recipe.id === id)).filter(Boolean);
+    const linkedMarkup = linkedRecipes.length ? `<section class="el-print-section">
+      <h2>调用的实验配方</h2>
+      ${linkedRecipes.map(recipe => {
+        const context = recipeContext(recipe);
+        const rows = (recipe.components || []).map(component => `<tr><td>${printValue(component.name)}</td><td>${printValue(`${component.targetValue || ''} ${component.targetUnit || ''}`)}</td><td>${printValue(Core.formatQuantity(component.actualAmount))}</td></tr>`).join('');
+        return `<article class="el-print-linked-recipe"><h3>${printValue(recipe.name)}</h3><p>${printValue(`${context.experimentType} / ${context.category}${context.application ? ` / ${context.application}` : ''}`)}</p><table class="el-print-table"><thead><tr><th>成分</th><th>最终浓度</th><th>实际加入量</th></tr></thead><tbody>${rows}</tbody></table></article>`;
+      }).join('')}
+    </section>` : '';
     return `
       ${renderPrintMetadata([
         ['分类', protocol.category],
@@ -728,6 +984,7 @@
       ])}
       ${renderPrintTextSection('实验目的', protocol.purpose)}
       ${renderPrintTextSection('实验材料', protocol.materials)}
+      ${linkedMarkup}
       <section class="el-print-section">
         <h2>实验步骤</h2>
         <article class="el-print-markdown">${renderMarkdown(protocol.markdown || '')}</article>
@@ -771,7 +1028,7 @@
         <div><b>v${record.version || 1}</b><small>${escapeHtml(dateText(record.updatedAt))}</small></div>
       </header>
       ${content}
-          <footer class="el-print-footer"><span>BioAssay Studio v${escapeHtml(document.documentElement.dataset.appVersion || '2.12.0')}</span><span>${index + 1} / ${total} · 打印预览生成于 ${escapeHtml(dateText(now()))}</span></footer>
+<footer class="el-print-footer"><span>BioAssay Studio v${escapeHtml(document.documentElement.dataset.appVersion || '2.16.2')}</span><span>${index + 1} / ${total} · 打印预览生成于 ${escapeHtml(dateText(now()))}</span></footer>
     </article>`;
   }
 
@@ -1076,6 +1333,8 @@
       return {
         ...common,
         name: '未命名实验配方',
+        experimentType: '通用实验',
+        application: '',
         purpose: '',
         targetVolume: 50,
         targetVolumeUnit: 'mL',
@@ -1086,7 +1345,7 @@
       };
     }
     if (store === 'protocols') {
-      return { ...common, name: '未命名实验方法', purpose: '', materials: '', markdown: '# 实验步骤\n\n1. ', cautions: '', troubleshooting: '', references: '', preview: false };
+      return { ...common, name: '未命名实验方法', purpose: '', materials: '', linkedRecipeIds: [], markdown: '# 实验步骤\n\n1. ', cautions: '', troubleshooting: '', references: '', preview: false };
     }
     if (store === 'stocks') {
       return { ...common, name: '未命名母液', chemicalId: '', concentration: 1, unit: 'M', molecularWeight: '', preparation: '', storage: '', expiryDays: '', records: [] };
@@ -1409,7 +1668,7 @@
     const summary = String(payload.summary || payload.sourceModule || '来自 BioAssay Studio 分析模块').trim();
     const record = await saveCalculation(type, payload.input || {}, payload.result || {}, label, summary);
     record.sourceModule = String(payload.sourceModule || '').trim();
-    record.appVersion = document.documentElement.dataset.appVersion || '2.12.0';
+      record.appVersion = document.documentElement.dataset.appVersion || '2.16.2';
     await dbPut('calculations', record);
     if (state.page === 'home' || state.page === 'calculator') renderShell();
     notice(`已接收“${label}”，可在智能计算器的计算历史中重新查看。`, 'good');
@@ -1458,12 +1717,15 @@
       savedAt: now(),
       name: record.name || record.title,
       category: record.category,
+      experimentType: record.experimentType,
+      application: record.application,
       purpose: record.purpose,
       targetVolume: record.targetVolume,
       targetVolumeUnit: record.targetVolumeUnit,
       components: clone(record.components || []),
       steps: clone(record.steps || []),
       markdown: record.markdown,
+      linkedRecipeIds: clone(record.linkedRecipeIds || []),
     };
     record.versionHistory = [...(record.versionHistory || []), snapshot].slice(-50);
     record.version = (record.version || 1) + 1;
@@ -1471,6 +1733,37 @@
     await dbPut(state.selection.store, record);
     refreshMain();
     notice(`已生成 v${record.version}，上一版本已保留。`, 'good');
+  }
+
+  async function insertRecipeIntoProtocol() {
+    const protocol = selectedRecord();
+    if (!protocol || state.selection?.store !== 'protocols') return;
+    const select = document.getElementById('elProtocolRecipeSelect');
+    const recipeId = select?.value;
+    const recipe = state.records.recipes.find(item => item.id === recipeId);
+    if (!recipe) {
+      notice('请先选择要插入的实验配方。', 'bad');
+      return;
+    }
+    protocol.linkedRecipeIds = [...new Set([...(protocol.linkedRecipeIds || []), recipe.id])];
+    const context = recipeContext(recipe);
+    const materialLine = `- ${recipe.name}（${context.experimentType} / ${context.category}${context.application ? ` / ${context.application}` : ''}，${recipe.targetVolume || '—'} ${recipe.targetVolumeUnit || ''}）`;
+    const materials = String(protocol.materials || '').trim();
+    if (!materials.includes(recipe.name)) protocol.materials = [materials, materialLine].filter(Boolean).join('\n');
+    protocol.updatedAt = now();
+    await dbPut('protocols', protocol);
+    refreshMain();
+    notice(`已将“${recipe.name}”插入当前实验方法。`, 'good');
+  }
+
+  async function removeRecipeFromProtocol(recipeId) {
+    const protocol = selectedRecord();
+    if (!protocol || state.selection?.store !== 'protocols') return;
+    protocol.linkedRecipeIds = (protocol.linkedRecipeIds || []).filter(id => id !== recipeId);
+    protocol.updatedAt = now();
+    await dbPut('protocols', protocol);
+    refreshMain();
+    notice('已移除配方引用；实验材料中的文字仍保留，可手动修改。', 'good');
   }
 
   function recipeTsv(recipe) {
@@ -2072,6 +2365,9 @@
         }
       } else if (action === 'new-version') await createNewVersion();
       else if (action === 'delete-record') await deleteRecord();
+      else if (action === 'open-component-import') openComponentImport(actionButton.dataset.elImportTarget);
+      else if (action === 'close-component-import') closeComponentImport();
+      else if (action === 'confirm-component-import') await confirmComponentImport();
       else if (action === 'download-attachment') await openAttachment(actionButton.dataset.elId);
       else if (action === 'delete-attachment') await deleteAttachment(actionButton.dataset.elId);
       else if (action === 'recalculate-recipe') await recalculateRecipe(true);
@@ -2104,6 +2400,10 @@
         protocol.preview = !protocol.preview;
         scheduleSave(protocol);
         refreshMain();
+      } else if (action === 'insert-selected-recipe') {
+        await insertRecipeIntoProtocol();
+      } else if (action === 'remove-linked-recipe') {
+        await removeRecipeFromProtocol(actionButton.dataset.elId);
       } else if (action === 'add-stock-record') {
         const stock = selectedRecord();
         stock.records = [...(stock.records || []), { date: new Date().toISOString().slice(0, 10), volume: '', operator: '', notes: '' }];
@@ -2124,21 +2424,7 @@
         state.calculatorDraft.buffer.components.splice(Number(actionButton.dataset.index), 1);
         refreshMain();
       } else if (action === 'paste-components') {
-        const text = window.prompt('粘贴“成分<Tab>浓度<Tab>单位<Tab>MW”，每行一个成分：');
-        if (text) {
-          const rows = text.split(/\r?\n/).map(line => line.split(/\t|,/)).filter(row => row[0]?.trim());
-          state.calculatorDraft.buffer.components = rows.map(row => ({
-            id: uid('component'),
-            name: row[0].trim(),
-            targetValue: Number(row[1]) || '',
-            targetUnit: row[2]?.trim() || 'mM',
-            sourceType: 'auto',
-            stockId: '',
-            molecularWeight: Number(row[3]) || findChemicalRecord(row[0])?.molecularWeight || '',
-            molecularWeightSource: Number(row[3]) ? 'manual' : 'library',
-          }));
-          refreshMain();
-        }
+        openComponentImport('calculator');
       } else if (action === 'open-calculation') {
         const calculation = state.records.calculations.find(item => item.id === actionButton.dataset.elId);
         if (calculation) {
@@ -2182,6 +2468,9 @@
             component.molecularWeightSource = '';
           }
         }
+      } else if (event.target.matches('[data-el-import-text]')) {
+        state.componentImport.text = event.target.value;
+        state.componentImport.error = '';
       } else if (event.target.id === 'elSearchInput') state.searchQuery = event.target.value;
     });
 
@@ -2220,7 +2509,10 @@
     });
 
     mount.addEventListener('keydown', event => {
-      if (event.key === 'Escape' && state.print.open) {
+      if (event.key === 'Escape' && state.componentImport.open) {
+        event.preventDefault();
+        closeComponentImport();
+      } else if (event.key === 'Escape' && state.print.open) {
         event.preventDefault();
         closePrintDialog();
       } else if (event.target.id === 'elSearchInput' && event.key === 'Enter') {

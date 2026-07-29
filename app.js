@@ -8,24 +8,39 @@
   const sheetDialog = $('#sheetDialog');
   const tiffPageDialog = $('#tiffPageDialog');
   const core = window.BioAssayCore;
-const APP_VERSION = document.documentElement.dataset.appVersion || '2.12.0';
+  const APP_VERSION = document.documentElement.dataset.appVersion || '2.16.2';
   const auditLog = [];
   const history = { undo: [], redo: [], applying: false, max: 50 };
   const resourcePromises = new Map();
 
   const qpcr = {
     step: 1,
+    projectName: '未命名 qPCR 项目',
     headers: [],
     rows: [],
-    mapping: { sample: '', gene: '', ct: '', replicate: '' },
+    mapping: { sample: '', gene: '', ct: '', replicate: '', well: '' },
+    groupingMode: 'sample',
+    prefixBaselineLabel: 'CONTROL',
     qc: { min: 5, max: 40, sd: 2, deviation: 1 },
+    qcView: 'table',
+    flaggedOnly: false,
+    selectedRowId: '',
+    selectedRowIds: [],
+    selectionAnchorId: '',
     efficiencies: {},
     references: [],
     controls: [],
     results: [],
     resultView: 'table',
+    resultGene: 'all',
+    chartTheme: 'color',
+    chartError: 'sd',
+    technicalAsIndependent: false,
+    significanceAlpha: 0.05,
+    statistics: [],
     chart: null,
     pendingWorkbook: null,
+    exampleKind: '',
   };
 
   const wb = {
@@ -49,6 +64,11 @@ const APP_VERSION = document.documentElement.dataset.appVersion || '2.12.0';
     guide: null,
     guideEditing: false,
     guideInteraction: null,
+    lineGuides: [],
+    lineGuideEditing: false,
+    lineGuideDraft: null,
+    lineGuideInteraction: null,
+    nextLineGuideId: 1,
     zoom: 1,
     panCenter: null,
     panKey: false,
@@ -184,6 +204,59 @@ const APP_VERSION = document.documentElement.dataset.appVersion || '2.12.0';
     },
   };
 
+  const qpcrJournalOverlay = {
+    id: 'qpcrJournalOverlay',
+    afterDatasetsDraw(chart) {
+      const { ctx, data, scales } = chart;
+      data.datasets.forEach((dataset, datasetIndex) => {
+        const bars = chart.getDatasetMeta(datasetIndex).data;
+        bars.forEach((bar, index) => {
+          if (!bar) return;
+          const points = (dataset.rawPoints?.[index] || []).filter(Number.isFinite);
+          if (points.length > 1) {
+            ctx.save();
+            ctx.fillStyle = dataset.pointColor || '#111';
+            ctx.strokeStyle = '#fff';
+            ctx.lineWidth = 0.8;
+            points.forEach((value, pointIndex) => {
+              const jitter = points.length === 1 ? 0 : ((pointIndex / (points.length - 1)) - 0.5) * Math.min(18, bar.width * 0.48);
+              const x = bar.x + jitter;
+              const y = scales.y.getPixelForValue(value);
+              ctx.beginPath();
+              ctx.arc(x, y, 2.8, 0, Math.PI * 2);
+              ctx.fill();
+              ctx.stroke();
+            });
+            ctx.restore();
+          }
+          const label = dataset.significanceLabels?.[index];
+          if (!label || label === '—') return;
+          const value = dataset.data[index];
+          const error = dataset.errorBars?.[index] || 0;
+          if (!Number.isFinite(value)) return;
+          ctx.save();
+          ctx.fillStyle = '#111';
+          ctx.font = 'italic 700 13px "Times New Roman", SimSun, serif';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'bottom';
+          ctx.fillText(label, bar.x, scales.y.getPixelForValue(value + error) - 6);
+          ctx.restore();
+        });
+      });
+    },
+    afterDraw(chart, _args, options) {
+      if (!options?.footnote) return;
+      const { ctx, width, height } = chart;
+      ctx.save();
+      ctx.fillStyle = '#555';
+      ctx.font = '10px "Times New Roman", SimSun, serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'bottom';
+      ctx.fillText(options.footnote, width / 2, height - 3);
+      ctx.restore();
+    },
+  };
+
   const canvas = $('#wbCanvas');
   const ctx = canvas.getContext('2d');
   const wbViewport = $('#wbViewport');
@@ -294,6 +367,133 @@ const APP_VERSION = document.documentElement.dataset.appVersion || '2.12.0';
     return Math.sqrt(values.reduce((sum, value) => sum + (value - average) ** 2, 0) / (values.length - 1));
   }
 
+  function logGamma(value) {
+    const coefficients = [
+      676.5203681218851, -1259.1392167224028, 771.3234287776531,
+      -176.6150291621406, 12.507343278686905, -0.13857109526572012,
+      9.984369578019572e-6, 1.5056327351493116e-7,
+    ];
+    if (value < 0.5) return Math.log(Math.PI) - Math.log(Math.sin(Math.PI * value)) - logGamma(1 - value);
+    let x = 0.9999999999998099;
+    const adjusted = value - 1;
+    coefficients.forEach((coefficient, index) => { x += coefficient / (adjusted + index + 1); });
+    const t = adjusted + coefficients.length - 0.5;
+    return 0.5 * Math.log(2 * Math.PI) + (adjusted + 0.5) * Math.log(t) - t + Math.log(x);
+  }
+
+  function betaContinuedFraction(a, b, x) {
+    const maxIterations = 200;
+    const epsilon = 3e-12;
+    const floor = 1e-300;
+    const sum = a + b;
+    const plus = a + 1;
+    const minus = a - 1;
+    let c = 1;
+    let d = 1 - (sum * x) / plus;
+    if (Math.abs(d) < floor) d = floor;
+    d = 1 / d;
+    let result = d;
+    for (let iteration = 1; iteration <= maxIterations; iteration += 1) {
+      const even = iteration * 2;
+      let delta = (iteration * (b - iteration) * x) / ((minus + even) * (a + even));
+      d = 1 + delta * d;
+      if (Math.abs(d) < floor) d = floor;
+      c = 1 + delta / c;
+      if (Math.abs(c) < floor) c = floor;
+      d = 1 / d;
+      result *= d * c;
+      delta = -((a + iteration) * (sum + iteration) * x) / ((a + even) * (plus + even));
+      d = 1 + delta * d;
+      if (Math.abs(d) < floor) d = floor;
+      c = 1 + delta / c;
+      if (Math.abs(c) < floor) c = floor;
+      d = 1 / d;
+      const change = d * c;
+      result *= change;
+      if (Math.abs(change - 1) < epsilon) break;
+    }
+    return result;
+  }
+
+  function regularizedIncompleteBeta(x, a, b) {
+    if (!(x > 0)) return 0;
+    if (!(x < 1)) return 1;
+    const factor = Math.exp(logGamma(a + b) - logGamma(a) - logGamma(b) + a * Math.log(x) + b * Math.log1p(-x));
+    return x < (a + 1) / (a + b + 2)
+      ? factor * betaContinuedFraction(a, b, x) / a
+      : 1 - factor * betaContinuedFraction(b, a, 1 - x) / b;
+  }
+
+  function twoSidedStudentTPValue(tStatistic, degreesOfFreedom) {
+    if (!Number.isFinite(tStatistic) || !(degreesOfFreedom > 0)) return NaN;
+    const absolute = Math.abs(tStatistic);
+    const x = degreesOfFreedom / (degreesOfFreedom + absolute ** 2);
+    return clamp(regularizedIncompleteBeta(x, degreesOfFreedom / 2, 0.5), 0, 1);
+  }
+
+  function welchComparison(leftValues, rightValues) {
+    const left = leftValues.filter(Number.isFinite);
+    const right = rightValues.filter(Number.isFinite);
+    if (left.length < 2 || right.length < 2) return { valid: false, p: NaN, t: NaN, df: NaN };
+    const leftVariance = sd(left) ** 2;
+    const rightVariance = sd(right) ** 2;
+    const leftTerm = leftVariance / left.length;
+    const rightTerm = rightVariance / right.length;
+    const denominator = Math.sqrt(leftTerm + rightTerm);
+    if (!(denominator > 0)) {
+      const equal = Math.abs(mean(left) - mean(right)) < 1e-12;
+      return { valid: true, p: equal ? 1 : 0, t: equal ? 0 : Math.sign(mean(left) - mean(right)) * Infinity, df: Infinity };
+    }
+    const t = (mean(left) - mean(right)) / denominator;
+    const dfDenominator = (leftTerm ** 2) / (left.length - 1) + (rightTerm ** 2) / (right.length - 1);
+    const df = ((leftTerm + rightTerm) ** 2) / dfDenominator;
+    return { valid: true, p: twoSidedStudentTPValue(t, df), t, df };
+  }
+
+  function holmAdjust(comparisons) {
+    const valid = comparisons.filter(item => Number.isFinite(item.p)).sort((a, b) => a.p - b.p);
+    let previous = 0;
+    valid.forEach((item, index) => {
+      previous = Math.max(previous, Math.min(1, item.p * (valid.length - index)));
+      item.adjustedP = previous;
+    });
+    comparisons.filter(item => !Number.isFinite(item.p)).forEach(item => { item.adjustedP = NaN; });
+    return comparisons;
+  }
+
+  function compactLetterDisplay(groupNames, significantPairs, order = groupNames) {
+    if (!groupNames.length) return {};
+    let columns = [new Set(groupNames)];
+    significantPairs.forEach(([left, right]) => {
+      const next = [];
+      columns.forEach(column => {
+        if (!column.has(left) || !column.has(right)) {
+          next.push(column);
+          return;
+        }
+        const withoutLeft = new Set(column);
+        const withoutRight = new Set(column);
+        withoutLeft.delete(left);
+        withoutRight.delete(right);
+        if (withoutLeft.size) next.push(withoutLeft);
+        if (withoutRight.size) next.push(withoutRight);
+      });
+      columns = next.filter((column, index, all) => !all.some((other, otherIndex) => (
+        otherIndex !== index && column.size < other.size && [...column].every(name => other.has(name))
+      )));
+    });
+    const rank = new Map(order.map((name, index) => [name, index]));
+    columns.sort((left, right) => Math.min(...[...left].map(name => rank.get(name) ?? 999))
+      - Math.min(...[...right].map(name => rank.get(name) ?? 999)));
+    const letters = {};
+    groupNames.forEach(name => { letters[name] = ''; });
+    columns.forEach((column, index) => {
+      const letter = index < 26 ? String.fromCharCode(97 + index) : `a${index - 25}`;
+      column.forEach(name => { letters[name] += letter; });
+    });
+    return letters;
+  }
+
   function fmt(value, digits = 3) {
     return Number.isFinite(value) ? value.toFixed(digits) : '—';
   }
@@ -316,7 +516,7 @@ const APP_VERSION = document.documentElement.dataset.appVersion || '2.12.0';
 
   function editableSnapshot() {
     return {
-      wb: { rois: cloneData(wb.rois), referenceId: wb.referenceId, profileRoiId: wb.profileRoiId, selectedId: wb.selectedId, backgroundMode: wb.backgroundMode, nextId: wb.nextId, guide: wb.guide ? cloneData(wb.guide) : null },
+      wb: { rois: cloneData(wb.rois), referenceId: wb.referenceId, profileRoiId: wb.profileRoiId, selectedId: wb.selectedId, backgroundMode: wb.backgroundMode, nextId: wb.nextId, guide: wb.guide ? cloneData(wb.guide) : null, lineGuides: cloneData(wb.lineGuides), nextLineGuideId: wb.nextLineGuideId },
       pair: {
         baseline: pair.baseline, defaultLoadVolume: pair.defaultLoadVolume, loads: cloneData(pair.loads),
         reference: { rois: cloneData(pair.reference.rois), nextId: pair.reference.nextId },
@@ -336,6 +536,9 @@ const APP_VERSION = document.documentElement.dataset.appVersion || '2.12.0';
     Object.assign(wb, cloneData(snapshot.wb || {}));
     wb.guideEditing = false;
     wb.guideInteraction = null;
+    wb.lineGuideEditing = false;
+    wb.lineGuideDraft = null;
+    wb.lineGuideInteraction = null;
     pair.baseline = snapshot.pair?.baseline || '';
     pair.defaultLoadVolume = number(snapshot.pair?.defaultLoadVolume, 20);
     pair.loads = cloneData(snapshot.pair?.loads || {});
@@ -677,6 +880,7 @@ const APP_VERSION = document.documentElement.dataset.appVersion || '2.12.0';
       gene: match(['target', 'gene', 'detector', 'primer', '基因', '靶标']),
       ct: match(['ct', 'cq', 'cp', 'thresholdcycle']),
       replicate: match(['replicate', 'rep', 'biologicalsample', '生物学重复', '重复编号', '个体']),
+      well: match(['wellposition', 'well', '孔位', '孔号']),
     };
   }
 
@@ -688,8 +892,42 @@ const APP_VERSION = document.documentElement.dataset.appVersion || '2.12.0';
     return row.cells[qpcr.mapping[key]];
   }
 
+  function normalizeQpcrIdentifier(value) {
+    return String(value ?? '').replace(/[\uFF01-\uFF5E]/g, character => String.fromCharCode(character.charCodeAt(0) - 0xFEE0))
+      .replace(/\u3000/g, ' ').trim();
+  }
+
+  function rawQValue(row, key) {
+    return key === 'ct' ? number(sourceValue(row, key)) : normalizeQpcrIdentifier(sourceValue(row, key));
+  }
+
+  function targetPrefixSuggestion() {
+    const targets = [...new Set(qpcr.rows.map(row => rawQValue(row, 'gene')).filter(Boolean))];
+    const targetSet = new Set(targets);
+    const prefixes = new Map();
+    targets.forEach(target => {
+      const match = target.match(/^([^-–—_]{1,24})[-–—_](.+)$/);
+      if (!match || !targetSet.has(match[2])) return;
+      if (!prefixes.has(match[1])) prefixes.set(match[1], []);
+      prefixes.get(match[1]).push({ original: target, gene: match[2] });
+    });
+    const qualified = [...prefixes.entries()].filter(([, pairs]) => pairs.length >= 2);
+    return {
+      available: qualified.length > 0,
+      prefixes: qualified.map(([prefix]) => prefix),
+      pairs: qualified.flatMap(([, pairs]) => pairs),
+    };
+  }
+
   function qValue(row, key) {
-    return key === 'ct' ? number(sourceValue(row, key)) : String(sourceValue(row, key) ?? '').trim();
+    if (key === 'ct') return rawQValue(row, key);
+    if (qpcr.groupingMode !== 'target-prefix' || !['sample', 'gene'].includes(key)) return rawQValue(row, key);
+    const rawGene = rawQValue(row, 'gene');
+    const suggestion = targetPrefixSuggestion();
+    const prefix = suggestion.prefixes.find(candidate => rawGene.startsWith(`${candidate}-`)
+      || rawGene.startsWith(`${candidate}–`) || rawGene.startsWith(`${candidate}—`) || rawGene.startsWith(`${candidate}_`));
+    if (!prefix) return key === 'sample' ? qpcr.prefixBaselineLabel : rawGene;
+    return key === 'sample' ? prefix : rawGene.slice(prefix.length + 1);
   }
 
   function validQpcrRows() {
@@ -719,7 +957,7 @@ const APP_VERSION = document.documentElement.dataset.appVersion || '2.12.0';
     const sample = qValue(row, 'sample');
     const gene = qValue(row, 'gene');
     const replicate = qValue(row, 'replicate');
-    const group = qpcr.rows.filter(candidate => qValue(candidate, 'sample') === sample && qValue(candidate, 'gene') === gene && qValue(candidate, 'replicate') === replicate)
+    const group = qpcr.rows.filter(candidate => candidate.use && qValue(candidate, 'sample') === sample && qValue(candidate, 'gene') === gene && qValue(candidate, 'replicate') === replicate)
       .map(candidate => qValue(candidate, 'ct')).filter(Number.isFinite);
     if (group.length > 2 && sd(group) > qpcr.qc.sd) return `组内 SD > ${qpcr.qc.sd}`;
     if (group.length > 2 && Math.abs(ct - mean(group)) > qpcr.qc.deviation) return `偏离均值 > ${qpcr.qc.deviation}`;
@@ -741,7 +979,39 @@ const APP_VERSION = document.documentElement.dataset.appVersion || '2.12.0';
       ['Treatment B', 'TNFα', 26.01], ['Treatment B', 'TNFα', 26.12], ['Treatment B', 'TNFα', 26.06],
       ['Treatment B', 'IL10', 27.41], ['Treatment B', 'IL10', 27.52], ['Treatment B', 'IL10', 27.48],
     ];
-    return { headers: ['Sample', 'Target', 'Cq'], grid: source };
+    return {
+      headers: ['Well', 'Sample', 'Target', 'Cq'],
+      grid: source.map((row, index) => [`${String.fromCharCode(65 + Math.floor(index / 12))}${index % 12 + 1}`, ...row]),
+    };
+  }
+
+  const REN_QPCR_CQ_VALUES = [
+    21.4839516532595, 21.407510441337, 21.4798382050832, 16.2767866948107, 15.5360770228964, 16.2615101007914, 21.5202497938144, 21.5698051406437, 21.6362113532031, 17.8455261986306, 18.017026710148, 18.0692461602741,
+    20.2360944544771, 20.2809826703637, 19.900863181932, 15.6897229588129, 15.637486903768, 15.8335635711167, 21.3123564933888, 21.3773237037591, 21.2617805910841, 19.3573712443466, 19.1865327183008, 19.2823630467114,
+    20.139952699016, 20.114565856803, 20.078467287052, 15.3071131078407, 15.7020815033824, 15.2833794225071, 20.2192387939157, 20.2333902326565, 20.2849643703805, 16.7336574278582, 16.7754007500477, 17.1326510254609,
+    20.1356257873009, 20.113702453802, 19.8840294075927, 14.9148072850673, 15.002574332962, 15.0349291348126, 20.6450434087683, 20.5802823061213, 20.6118456657621, 18.1053495977548, 17.9065480869336, 18.1098965783002,
+    21.6631608869728, 21.2492999210332, 21.0653156186164, 16.6856862930943, 16.8702459497548, 17.1287324392749, 21.9291382013868, 21.7587891031017, 21.7082489868837, 18.0955686263455, 18.3219187688394, 18.317249495693,
+    20.858231449426, 20.7824292884887, 20.6338239004479, 16.2762364522297, 16.2087350528363, 16.3919817189929, 21.8628799089827, 21.9925117228665, 21.9885903318397, 19.8339505343116, 19.7522014456451, 19.8695170253483,
+    20.4171565959967, 20.1334629067028, 19.9224508984843, 15.4459741316172, 15.4171646059432, 15.5281406457431, 21.4330017673982, 21.2259094574176, 21.2797039719364, 17.4460126840424, 17.3560442891315, 17.5501965353104,
+    21.1554616002426, 20.9415547289222, 20.844564344234, 16.3740264636598, 16.2543590363564, 16.342166145282, 21.38403668768, 21.5231390546673, 21.5160571607298, 19.625488991977, 19.7712743759198, 19.5015148074112,
+  ];
+
+  function renQpcrDemoRows() {
+    const samples = ['kit', '7A', 'Nip', '8B', 'GLA4', '9+T', 'ZH11', 'ZB'];
+    const genes = ['UBQ5', 'SBEI', 'SBEIIa', 'SBEIIb'];
+    return {
+      headers: ['Well', 'Sample', 'Target', 'Cq'],
+      grid: REN_QPCR_CQ_VALUES.map((cq, index) => {
+        const rowIndex = Math.floor(index / 12);
+        const columnIndex = index % 12;
+        return [
+          `${String.fromCharCode(65 + rowIndex)}${String(columnIndex + 1).padStart(2, '0')}`,
+          samples[rowIndex],
+          genes[Math.floor(columnIndex / 3)],
+          cq,
+        ];
+      }),
+    };
   }
 
   function ingestGrid(headers, grid) {
@@ -756,6 +1026,17 @@ const APP_VERSION = document.documentElement.dataset.appVersion || '2.12.0';
     qpcr.references = [];
     qpcr.controls = [];
     qpcr.results = [];
+    qpcr.statistics = [];
+    qpcr.technicalAsIndependent = false;
+    qpcr.groupingMode = 'sample';
+    qpcr.prefixBaselineLabel = 'CONTROL';
+    qpcr.resultGene = 'all';
+    qpcr.selectedRowId = '';
+    qpcr.selectedRowIds = [];
+    qpcr.selectionAnchorId = '';
+    qpcr.flaggedOnly = false;
+    qpcr.qcView = qpcr.mapping.well ? 'plate' : 'table';
+    qpcr.exampleKind = '';
     qpcr.step = 2;
     renderQpcr();
     toastMessage(`已读取 ${qpcr.rows.length} 行数据，请确认列匹配。`);
@@ -775,17 +1056,18 @@ const APP_VERSION = document.documentElement.dataset.appVersion || '2.12.0';
     genes.forEach(gene => {
       if (!Number.isFinite(number(qpcr.efficiencies[gene]))) qpcr.efficiencies[gene] = 100;
     });
-    if (!qpcr.references.length && genes.length) {
-      qpcr.references = [genes.find(gene => /gapdh|actb|actin|18s|rplp0|ubq|eef[-_ ]?1|ef[-_ ]?1|tubulin|tua|tub\b/i.test(gene)) || genes[0]];
-    }
     if (!qpcr.controls.length && samples.length) {
       qpcr.controls = [samples.find(sample => /control|ctrl|vehicle|对照/i.test(sample)) || samples[0]];
     }
   }
 
+  function referenceSuggestions() {
+    return getGenes().filter(gene => /gapdh|actb|actin|18s|rplp0|ubq|eef[-_ ]?1|ef[-_ ]?1|tubulin|tua|tub\b/i.test(gene));
+  }
+
   function stepHtmlImport() {
     return `
-      <div class="step-header"><div><h3>导入 qPCR 原始数据</h3><p>支持 .csv、.tsv、.xlsx、.xls。数据保留在当前浏览器中处理。</p></div></div>
+      <div class="step-header"><div><h3>导入 qPCR 原始数据</h3><p>支持 .csv、.tsv、.xlsx、.xls。数据保留在当前浏览器中处理。</p></div><label class="qpcr-project-name">项目名称<input id="qpcrProjectName" value="${escapeHtml(qpcr.projectName)}" placeholder="如：IR7D 转录验证" /></label></div>
       <div id="qpcrUploadArea" class="upload-area">
         <div><div class="upload-badge">CSV / EXCEL</div><h4>点击选择文件，或将文件拖放到此处</h4><p>建议包含样本名称、目标基因和 Ct/Cq 三列。不同仪器导出的附加列可以保留，下一步手动匹配。</p><label class="button button-primary file-button direct-file-picker"><span>选择 qPCR 数据文件</span><input id="qpcrFileInput" type="file" accept=".csv,.tsv,.txt,.xlsx,.xls" aria-label="从电脑选择 qPCR 数据文件" /></label><div class="upload-footer">也可先点击右上角“载入示例数据”熟悉流程。</div></div>
       </div>`;
@@ -804,18 +1086,187 @@ const APP_VERSION = document.documentElement.dataset.appVersion || '2.12.0';
         <label>基因 / 靶标列 <select data-map="gene">${selectOptions(qpcr.mapping.gene)}</select></label>
         <label>Ct / Cq 数值列 <select data-map="ct">${selectOptions(qpcr.mapping.ct)}</select></label>
         <label>生物学重复列 <span class="field-hint">可选</span><select data-map="replicate">${selectOptions(qpcr.mapping.replicate)}</select></label>
+        <label>96 孔板孔位列 <span class="field-hint">可选</span><select data-map="well">${selectOptions(qpcr.mapping.well)}</select></label>
       </div>
-      <div class="preview-card"><h4>数据预览</h4><div class="table-wrap"><table><thead><tr>${qpcr.headers.map(header => `<th>${escapeHtml(header)}${header === qpcr.mapping.sample ? ' · 样本' : header === qpcr.mapping.gene ? ' · 基因' : header === qpcr.mapping.ct ? ' · Ct' : header === qpcr.mapping.replicate ? ' · 生物学重复' : ''}</th>`).join('')}</tr></thead><tbody>${preview.map(row => `<tr>${qpcr.headers.map(header => `<td>${escapeHtml(row.cells[header])}</td>`).join('')}</tr>`).join('')}</tbody></table></div></div>
-      <div class="actions-row"><button id="resetQpcr" class="button button-ghost">重新导入</button><button id="confirmMapping" class="button button-primary">确认匹配，进入质控</button></div>`;
+      <div class="preview-card"><h4>数据预览</h4><div class="table-wrap"><table><thead><tr>${qpcr.headers.map(header => `<th>${escapeHtml(header)}${header === qpcr.mapping.sample ? ' · 样本' : header === qpcr.mapping.gene ? ' · 基因' : header === qpcr.mapping.ct ? ' · Ct' : header === qpcr.mapping.replicate ? ' · 生物学重复' : header === qpcr.mapping.well ? ' · 孔位' : ''}</th>`).join('')}</tr></thead><tbody>${preview.map(row => `<tr>${qpcr.headers.map(header => `<td>${escapeHtml(row.cells[header])}</td>`).join('')}</tr>`).join('')}</tbody></table></div></div>
+      <div class="actions-row"><button id="confirmMapping" class="button button-primary">确认匹配，进入质控</button></div>`;
+  }
+
+  function normalizeWell(value) {
+    const match = String(value ?? '').trim().toUpperCase().match(/^([A-H])0?([1-9]|1[0-2])$/);
+    return match ? `${match[1]}${Number(match[2])}` : '';
+  }
+
+  function parseQpcrWellSelection(value) {
+    const selected = new Set();
+    const wellIndex = well => {
+      const normalized = normalizeWell(well);
+      if (!normalized) return -1;
+      const match = normalized.match(/^([A-H])(\d{1,2})$/);
+      return (match[1].charCodeAt(0) - 65) * 12 + Number(match[2]) - 1;
+    };
+    const indexWell = index => `${String.fromCharCode(65 + Math.floor(index / 12))}${index % 12 + 1}`;
+    String(value ?? '').split(/[,，;；\s]+/).filter(Boolean).forEach(token => {
+      const range = token.match(/^([A-H]0?(?:[1-9]|1[0-2]))\s*[-:~～]\s*([A-H]0?(?:[1-9]|1[0-2]))$/i);
+      if (!range) {
+        const well = normalizeWell(token);
+        if (well) selected.add(well);
+        return;
+      }
+      const start = wellIndex(range[1]);
+      const end = wellIndex(range[2]);
+      if (start < 0 || end < 0) return;
+      for (let index = Math.min(start, end); index <= Math.max(start, end); index += 1) selected.add(indexWell(index));
+    });
+    return selected;
+  }
+
+  function parseQpcrLabelList(value) {
+    return String(value ?? '').split(/[,，;；\n\r]+/).map(normalizeQpcrIdentifier).filter(Boolean);
+  }
+
+  const QPCR_SAMPLE_PALETTE = [
+    { soft: '#e7f1ff', border: '#5f91e8', ink: '#234f91' },
+    { soft: '#e9f8ef', border: '#52ad7b', ink: '#216a45' },
+    { soft: '#fff1dc', border: '#e5a149', ink: '#865110' },
+    { soft: '#f3eaff', border: '#9b73dc', ink: '#5e3699' },
+    { soft: '#ffe9ef', border: '#dc718e', ink: '#8e3651' },
+    { soft: '#e6f8f7', border: '#49aaa5', ink: '#1d6966' },
+    { soft: '#f4f0df', border: '#a99447', ink: '#685a1e' },
+    { soft: '#eceef5', border: '#7d89aa', ink: '#46516f' },
+    { soft: '#fbe9df', border: '#d47b55', ink: '#80442c' },
+    { soft: '#e8f5dc', border: '#7da950', ink: '#466b24' },
+  ];
+
+  function qpcrSampleColor(sample, paletteIndex = null) {
+    const normalized = normalizeQpcrIdentifier(sample);
+    if (!normalized) return { soft: '#f4f7fb', border: '#c9d8e9', ink: '#52677e' };
+    if (Number.isInteger(paletteIndex)) return QPCR_SAMPLE_PALETTE[paletteIndex % QPCR_SAMPLE_PALETTE.length];
+    let hash = 0;
+    for (const character of normalized) hash = ((hash * 31) + character.codePointAt(0)) >>> 0;
+    return QPCR_SAMPLE_PALETTE[hash % QPCR_SAMPLE_PALETTE.length];
+  }
+
+  function qpcrSampleStyle(sample, paletteIndex = null) {
+    const color = qpcrSampleColor(sample, paletteIndex);
+    return `--sample-soft:${color.soft};--sample-border:${color.border};--sample-ink:${color.ink}`;
+  }
+
+  function qpcrWellCoordinates(row) {
+    const match = normalizeWell(rawQValue(row, 'well')).match(/^([A-H])(\d{1,2})$/);
+    if (!match) return null;
+    return { row: match[1].charCodeAt(0) - 65, column: Number(match[2]) - 1 };
+  }
+
+  function selectedQpcrRows() {
+    const selected = new Set(qpcr.selectedRowIds || []);
+    return qpcr.rows.filter(row => selected.has(row.id)).sort((left, right) => {
+      const a = qpcrWellCoordinates(left);
+      const b = qpcrWellCoordinates(right);
+      return a && b ? (a.row * 12 + a.column) - (b.row * 12 + b.column) : 0;
+    });
+  }
+
+  function qpcrRectangleSelection(startId, endId, baseIds = []) {
+    const start = qpcr.rows.find(row => row.id === startId);
+    const end = qpcr.rows.find(row => row.id === endId);
+    const a = start && qpcrWellCoordinates(start);
+    const b = end && qpcrWellCoordinates(end);
+    if (!a || !b) return [...new Set(baseIds)];
+    const minRow = Math.min(a.row, b.row);
+    const maxRow = Math.max(a.row, b.row);
+    const minColumn = Math.min(a.column, b.column);
+    const maxColumn = Math.max(a.column, b.column);
+    const selected = new Set(baseIds);
+    qpcr.rows.forEach(row => {
+      const point = qpcrWellCoordinates(row);
+      if (point && point.row >= minRow && point.row <= maxRow && point.column >= minColumn && point.column <= maxColumn) selected.add(row.id);
+    });
+    return [...selected];
+  }
+
+  function updateQpcrPlateSelectionClasses(plate) {
+    const selected = new Set(qpcr.selectedRowIds || []);
+    plate?.querySelectorAll('[data-plate-row]').forEach(button => {
+      const active = selected.has(button.dataset.plateRow);
+      button.classList.toggle('selected', active);
+      button.setAttribute('aria-pressed', String(active));
+    });
+  }
+
+  function qpcrPlateHtml() {
+    if (!qpcr.mapping.well) {
+      return '<div class="qpcr-plate-empty"><b>尚未匹配孔位列</b><span>返回“匹配数据列”，将 Well / 孔位列映射后即可查看 96 孔板。</span></div>';
+    }
+    const rowByWell = new Map();
+    qpcr.rows.forEach(row => {
+      const well = normalizeWell(qValue(row, 'well'));
+      if (well && !rowByWell.has(well)) rowByWell.set(well, row);
+    });
+    const sampleNames = [...new Set([...rowByWell.values()].map(row => qValue(row, 'sample')).filter(Boolean))];
+    const sampleColorIndexes = new Map(sampleNames.map((sample, index) => [sample, index]));
+    const columns = Array.from({ length: 12 }, (_, index) => index + 1);
+    const rows = 'ABCDEFGH'.split('');
+    const cells = rows.flatMap(rowLetter => columns.map(column => {
+      const well = `${rowLetter}${column}`;
+      const row = rowByWell.get(well);
+      if (!row) return `<button class="qpcr-well empty" type="button" disabled aria-label="${well} 空孔"><span>${well}</span></button>`;
+      const flag = rowFlag(row);
+      const selected = (qpcr.selectedRowIds || []).includes(row.id);
+      const sample = qValue(row, 'sample');
+      const title = `${well} · ${sample || '未命名样本'} · ${qValue(row, 'gene')} · Ct ${fmt(qValue(row, 'ct'), 3)}${flag ? ` · ${flag}` : ''}`;
+      return `<button class="qpcr-well ${flag ? 'flagged' : ''} ${row.use ? '' : 'excluded'} ${selected ? 'selected' : ''}" type="button" data-plate-row="${row.id}" data-plate-well="${well}" aria-pressed="${selected}" style="${qpcrSampleStyle(sample, sampleColorIndexes.get(sample))}" title="${escapeHtml(title)}"><span>${well}<i class="qpcr-sample-dot" aria-hidden="true"></i></span><b>${escapeHtml(qValue(row, 'gene'))}</b><small>${fmt(qValue(row, 'ct'), 2)}</small></button>`;
+    })).join('');
+    const legend = sampleNames.length
+      ? `<div class="qpcr-sample-legend" aria-label="样本颜色图例"><b>样本颜色</b>${sampleNames.map(sample => `<span style="${qpcrSampleStyle(sample, sampleColorIndexes.get(sample))}"><i aria-hidden="true"></i>${escapeHtml(sample)}</span>`).join('')}</div>`
+      : '<div class="qpcr-sample-legend empty"><b>样本颜色</b><span>为选中孔填写样本名称后会自动着色</span></div>';
+    const selectedRows = selectedQpcrRows();
+    const wells = selectedRows.map(row => normalizeWell(rawQValue(row, 'well')));
+    const sharedSample = selectedRows.length && selectedRows.every(row => rawQValue(row, 'sample') === rawQValue(selectedRows[0], 'sample')) ? rawQValue(selectedRows[0], 'sample') : '';
+    const sharedGene = selectedRows.length && selectedRows.every(row => rawQValue(row, 'gene') === rawQValue(selectedRows[0], 'gene')) ? rawQValue(selectedRows[0], 'gene') : '';
+    const selectionLabel = wells.length <= 6 ? wells.join('、') : `${wells.slice(0, 3).join('、')} … ${wells.slice(-2).join('、')}`;
+    const detail = selectedRows.length
+      ? `<aside class="qpcr-well-detail qpcr-selection-editor"><div><span>已选择</span><strong>${selectedRows.length} 孔</strong></div><p class="qpcr-selection-wells">${escapeHtml(selectionLabel)}</p><label>样本 / 组<input id="qpcrSelectedSample" type="text" value="${escapeHtml(sharedSample)}" placeholder="留空则保留原样" /></label><label>基因名称<input id="qpcrSelectedGene" type="text" value="${escapeHtml(sharedGene)}" placeholder="留空则保留原样" list="qpcrDetectedGenes" /></label><label>基因角色<select id="qpcrSelectedRole"><option value="keep">不更改角色</option><option value="target">设为靶基因</option><option value="reference">设为内参基因</option></select></label><button class="button button-primary" type="button" id="applySelectedQpcrAnnotation">应用到选中孔</button><div class="qpcr-selection-actions"><button class="button button-danger-soft" type="button" id="excludeSelectedQpcrWells">排除</button><button class="button button-secondary" type="button" id="includeSelectedQpcrWells">纳入</button><button class="button button-ghost" type="button" id="clearQpcrWellSelection">清除选择</button></div></aside>`
+      : '<aside class="qpcr-well-detail empty"><b>直接在板上选择孔</b><span>单击单选；Ctrl/⌘ 单击增减选择；Shift 连选；按住鼠标拖动可框选矩形区域。</span></aside>';
+    return `${legend}<div class="qpcr-plate-selection-help"><b>选择孔位后在右侧一次命名</b><span>拖动框选 · Ctrl/⌘ 多选 · Shift 连选</span></div><div class="qpcr-plate-layout"><div class="qpcr-plate" aria-label="96 孔板，可单选、多选或拖框选择">${cells}</div>${detail}</div>`;
   }
 
   function stepHtmlQcConfig() {
-    const flags = qpcr.rows.filter(row => rowFlag(row));
+    const flags = qpcr.rows.filter(row => row.use && rowFlag(row));
     const used = qpcr.rows.filter(row => row.use).length;
     const genes = getGenes();
     const samples = getSamples();
+    const suggestions = referenceSuggestions();
+    const prefixSuggestion = targetPrefixSuggestion();
+    const rowsWithoutSample = qpcr.rows.filter(row => row.use && rawQValue(row, 'gene') && Number.isFinite(rawQValue(row, 'ct')) && !rawQValue(row, 'sample'));
+    const rowsWithoutGene = qpcr.rows.filter(row => row.use && Number.isFinite(rawQValue(row, 'ct')) && !rawQValue(row, 'gene'));
+    const biologicalReplicatesDetected = hasBiologicalReplicateMapping();
+    const prefixSummary = prefixSuggestion.prefixes.map(prefix => `${prefix}-* → ${prefix}`).join('；');
+    const exampleCard = qpcr.exampleKind === 'ren-96'
+      ? `<div class="config-card qpcr-example-card"><div><span class="pill info">真实数据教学示例</span><h4>8 种样本 × 4 个基因 × 3 次技术重复</h4><p>A–H 行依次为 kit、7A、Nip、8B、GLA4、9+T、ZH11、ZB；每 3 列是一组基因，依次为 UBQ5、SBEI、SBEIIa、SBEIIb。UBQ5 已设为内参，kit 已设为对照。先查看下方颜色孔板，再点击“计算 ΔΔCt 结果”。</p></div><button id="clearQpcrExampleHint" class="button button-ghost" type="button">我知道了</button></div>`
+      : '';
+    const groupingCard = prefixSuggestion.available
+      ? qpcr.groupingMode === 'target-prefix'
+        ? `<div class="config-card qpcr-grouping-card is-active"><div><h4>已按 Target 前缀重建实验分组</h4><p>程序把 Target 中的前缀作为样本组，并把前缀从基因名中移除：${escapeHtml(prefixSummary)}；无前缀基因归入下面的基线组。现在每个组都能分别匹配自己的内参。</p></div><div class="qpcr-grouping-actions"><label>无前缀基线组名称<input id="qpcrPrefixBaselineLabel" type="text" value="${escapeHtml(qpcr.prefixBaselineLabel)}" /></label><button id="useSampleColumnGrouping" class="button button-ghost" type="button">恢复按 Sample 列分组</button></div></div>`
+        : `<div class="config-card qpcr-grouping-card has-warning"><div><h4>检测到分组信息可能写在 Target 列</h4><p>发现 ${escapeHtml(prefixSummary)}，且存在对应的无前缀基因。当前按 Sample 列分组会让 UBQ5 只出现在 CONTROL，而 TREATMENT 组没有可配对的内参，因此 Ref Ct、ΔCt 和 Fold change 会为空。</p></div><button id="useTargetPrefixGrouping" class="button button-primary" type="button">按 Target 前缀重建分组</button></div>`
+      : '';
+    const incompleteSampleCard = rowsWithoutSample.length
+      ? `<div class="config-card qpcr-grouping-card has-error"><div><h4>${rowsWithoutSample.length} 行没有样本 / 组名称</h4><p>这些行不会进入 ΔCt 或 ΔΔCt 计算。若它们与某个已有组属于同一样本，可在右侧一次填入；若属于不同实验组，请直接在下方原始表的“样本”列逐行修改。</p></div><div class="qpcr-grouping-actions"><label>填入空白样本<input id="qpcrBlankSampleLabel" type="text" value="${escapeHtml(samples[0] || 'CONTROL')}" /></label><button id="fillBlankQpcrSamples" class="button button-secondary" type="button">填入全部空白行</button></div></div>`
+      : '';
+    const annotationCard = qpcr.mapping.well
+      ? `<div class="config-card qpcr-annotation-card">
+          <div class="qpcr-annotation-heading"><div><h4>96 孔板可视化标注</h4><p>本文件有 ${rowsWithoutGene.length} 个 Ct 孔尚未填写基因名。请优先在下方板图中单击、多选或拖框选择孔位，再在右侧一次填写名称。</p></div><span class="pill ${rowsWithoutGene.length ? 'warn' : 'good'}">${rowsWithoutGene.length ? `${rowsWithoutGene.length} 孔待标注` : '基因名已完整'}</span></div>
+          <div class="qpcr-annotation-shortcuts"><span>① 在板上选孔</span><span>② 右侧填写样本与基因</span><span>③ 应用到选中孔</span></div>
+          <details class="qpcr-plate-template"><summary>备用：按文字孔位 / 范围标注</summary><div class="qpcr-annotation-grid"><label>孔位 / 范围<input id="qpcrAnnotationWells" type="text" placeholder="如 A01-A03 或 A01,A02,A03" /></label><label>样本 / 组<input id="qpcrAnnotationSample" type="text" placeholder="如 WT、7A、Control" /></label><label>基因名称<input id="qpcrAnnotationGene" type="text" placeholder="如 UBQ5、SBEIIa" list="qpcrDetectedGenes" /></label><label>基因角色<select id="qpcrAnnotationRole"><option value="target">靶基因</option><option value="reference">内参基因</option></select></label><button id="applyQpcrAnnotation" class="button button-secondary" type="button">应用到这些孔</button></div></details>
+          <details class="qpcr-plate-template"><summary>整板模板：行表示样本、列块表示基因</summary><p>适合“每行一个样本、每 3 孔一个基因”的常见 96 孔布局。样本和基因按顺序用逗号或换行分隔。</p><div class="qpcr-template-grid"><label>样本（A→H）<textarea id="qpcrTemplateSamples" rows="3" placeholder="kit, 7A, Nip, 8B, GLA4, 9+T, ZH11, ZB"></textarea></label><label>基因（左→右）<textarea id="qpcrTemplateGenes" rows="3" placeholder="UBQ5, SBEI, SBEIIa, SBEIIb"></textarea></label><label>每个基因技术重复数<input id="qpcrTemplateReplicates" type="number" min="1" max="12" step="1" value="3" /></label><label>内参基因<input id="qpcrTemplateReference" type="text" placeholder="如 UBQ5" /></label><button id="applyQpcrPlateTemplate" class="button button-secondary" type="button">应用整板模板</button></div></details>
+          <datalist id="qpcrDetectedGenes">${genes.map(gene => `<option value="${escapeHtml(gene)}"></option>`).join('')}</datalist><p class="qpcr-annotation-note">标为“内参基因”后会自动加入下方内参列表；仍可继续重命名、移除或增加多个内参。</p>
+        </div>`
+      : '';
+    const visibleRows = qpcr.flaggedOnly ? qpcr.rows.filter(row => rowFlag(row)) : qpcr.rows;
     return `
-      <div class="step-header"><div><h3>原始数据质控与实验设计</h3><p>可直接修改 Ct 值、排除异常重复；再选择内参与 ΔΔCt 的对照样本。</p></div><div class="status-pills"><span class="pill info">${qpcr.rows.length} 原始行</span><span class="pill good">${used} 纳入</span><span class="pill ${flags.length ? 'warn' : 'good'}">${flags.length} 条提示</span></div></div>
+      <div class="step-header"><div><h3>${escapeHtml(qpcr.projectName || '未命名 qPCR 项目')}</h3><p>先检查 96 孔板或原始表，再由你明确指定内参与 ΔΔCt 对照组。</p></div><div class="status-pills"><span class="pill info">${qpcr.rows.length} 原始行</span><span class="pill good">${used} 纳入</span><span class="pill ${flags.length ? 'warn' : 'good'}">${flags.length} 条提示</span></div></div>
+      ${exampleCard}
+      ${annotationCard}
       <div class="qc-card">
         <div class="qc-settings">
           <label>最小 Ct<input data-qc="min" type="number" step="0.1" value="${qpcr.qc.min}" /></label>
@@ -823,14 +1274,22 @@ const APP_VERSION = document.documentElement.dataset.appVersion || '2.12.0';
           <label>组内 SD 阈值<input data-qc="sd" type="number" step="0.1" value="${qpcr.qc.sd}" /></label>
           <label>偏离均值阈值<input data-qc="deviation" type="number" step="0.1" value="${qpcr.qc.deviation}" /></label>
         </div>
-        <div class="table-wrap"><table><thead><tr><th>纳入</th><th>样本</th><th>基因</th><th>Ct / Cq</th><th>QC 状态</th></tr></thead><tbody>
-          ${qpcr.rows.map(row => { const flag = rowFlag(row); return `<tr class="${flag ? 'flagged' : ''}"><td><input class="use-check" data-use="${row.id}" type="checkbox" ${row.use ? 'checked' : ''} /></td><td>${escapeHtml(qValue(row, 'sample'))}</td><td>${escapeHtml(qValue(row, 'gene'))}</td><td><input class="table-input" data-ct="${row.id}" type="number" step="0.001" value="${escapeHtml(sourceValue(row, 'ct'))}" /></td><td>${flag ? `<span class="pill warn">${escapeHtml(flag)}</span>` : '<span class="pill good">正常</span>'}</td></tr>`; }).join('')}
+        <div class="qpcr-qc-toolbar">
+          <div class="result-tabs"><button class="result-tab ${qpcr.qcView === 'plate' ? 'active' : ''}" data-qc-view="plate">96 孔板</button><button class="result-tab ${qpcr.qcView === 'table' ? 'active' : ''}" data-qc-view="table">原始表格</button></div>
+          <div class="actions-row compact"><label class="inline-check"><input id="qpcrFlaggedOnly" type="checkbox" ${qpcr.flaggedOnly ? 'checked' : ''}/>仅显示提示项</label><button id="excludeFlaggedQpcr" class="button button-ghost" type="button">排除全部提示项</button><button id="useAllQpcr" class="button button-ghost" type="button">全部重新纳入</button></div>
+        </div>
+        <div class="${qpcr.qcView === 'plate' ? '' : 'hide'}">${qpcrPlateHtml()}</div>
+        <div class="${qpcr.qcView === 'table' ? '' : 'hide'} table-wrap"><table><thead><tr><th>纳入</th><th>孔位</th><th>样本（可编辑）</th><th>基因（可编辑）</th><th>Ct / Cq</th><th>QC 状态</th></tr></thead><tbody>
+          ${visibleRows.map(row => { const flag = rowFlag(row); return `<tr class="${flag ? 'flagged' : ''}"><td><input class="use-check" data-use="${row.id}" type="checkbox" ${row.use ? 'checked' : ''} /></td><td>${escapeHtml(normalizeWell(qValue(row, 'well')) || '—')}</td><td><input class="table-input qpcr-text-input" data-qpcr-text-row="${row.id}" data-qpcr-text-key="sample" type="text" value="${escapeHtml(sourceValue(row, 'sample'))}" /></td><td><input class="table-input qpcr-text-input" data-qpcr-text-row="${row.id}" data-qpcr-text-key="gene" type="text" value="${escapeHtml(sourceValue(row, 'gene'))}" /></td><td><input class="table-input" data-ct="${row.id}" type="number" step="0.001" value="${escapeHtml(sourceValue(row, 'ct'))}" /></td><td>${flag ? `<span class="pill warn">${escapeHtml(flag)}</span>` : '<span class="pill good">正常</span>'}</td></tr>`; }).join('')}
         </tbody></table></div>
       </div>
-      <div class="config-card"><h4>内参基因</h4><p>可多选。多个内参会先在同一样本中取平均 Ct。</p><div class="gene-chips">${genes.map(gene => `<button class="choice-chip ${qpcr.references.includes(gene) ? 'selected' : ''}" data-reference="${escapeHtml(gene)}">${escapeHtml(gene)}</button>`).join('')}</div></div>
+      ${incompleteSampleCard}
+      ${groupingCard}
+      <div class="config-card qpcr-reference-card"><div><h4>选择内参基因</h4><p>软件只识别数据中出现的基因，不会擅自把第一个基因当内参。支持选择一个或多个内参。</p>${suggestions.length ? `<p class="qpcr-suggestion">名称提示：${suggestions.map(escapeHtml).join('、')} 可能是常见内参，请结合你的实验设计确认。</p>` : '<p class="qpcr-suggestion neutral">未按名称匹配到常见内参；请从下拉菜单中选择你的真实内参。</p>'}</div><div class="qpcr-reference-picker"><select id="qpcrReferenceSelect"><option value="">选择检测到的基因…</option>${genes.filter(gene => !qpcr.references.includes(gene)).map(gene => `<option value="${escapeHtml(gene)}">${escapeHtml(gene)}</option>`).join('')}</select><button id="addQpcrReference" class="button button-secondary" type="button">加入内参</button></div><div class="gene-chips">${qpcr.references.length ? qpcr.references.map(gene => `<button class="choice-chip selected" data-remove-reference="${escapeHtml(gene)}" title="点击移除">${escapeHtml(gene)} ×</button>`).join('') : '<span class="muted">尚未选择内参，暂不能计算。</span>'}</div></div>
       <div class="config-card"><h4>对照样本 / 组</h4><p>选定的样本将定义每个靶基因 ΔΔCt 的基线。</p><div class="sample-chips">${samples.map(sample => `<button class="choice-chip ${qpcr.controls.includes(sample) ? 'selected' : ''}" data-control="${escapeHtml(sample)}">${escapeHtml(sample)}</button>`).join('')}</div></div>
       <div class="config-card"><h4>引物扩增效率</h4><p>按标准曲线填写扩增效率（%）；100% 对应每循环扩增因子 2.00。结果会同时保留 Livak 2<sup>−ΔΔCt</sup> 和效率校正值。</p><div class="compact-control-grid">${genes.map(gene => `<label>${escapeHtml(gene)}<input data-efficiency-gene="${escapeHtml(gene)}" type="number" min="1" max="150" step="0.1" value="${fmt(number(qpcr.efficiencies[gene], 100), 1)}" /></label>`).join('')}</div><p class="muted">没有标准曲线时保留 100%；效率异常或不同引物差异较大时，优先复核引物和标准曲线。</p></div>
-      <div class="actions-row"><button id="backToMapping" class="button button-ghost">返回匹配列</button><button id="calculateQpcr" class="button button-primary">计算 ΔΔCt 结果</button></div>`;
+      <div class="config-card qpcr-stat-mode-card ${biologicalReplicatesDetected ? 'biological' : qpcr.technicalAsIndependent ? 'technical-exploratory' : 'descriptive'}"><div><h4>差异分析的重复层级</h4><p>${biologicalReplicatesDetected ? '已从映射列中检测到独立生物学重复。统计检验将以每个生物学样本的 ΔCt 为单位，技术孔先在样本内合并。' : '当前没有检测到独立生物学重复。默认只报告技术重复均值与技术误差，不生成推断性 p 值或 a/b/c/d。'}</p></div><label class="qpcr-exploratory-toggle"><input id="qpcrTechnicalAsIndependent" type="checkbox" ${qpcr.technicalAsIndependent ? 'checked' : ''} ${biologicalReplicatesDetected ? 'disabled' : ''}/><span><b>将技术重复临时视为独立重复（探索性）</b><small>仅在确实没有生物学重复且需要预实验判断时启用；不替代正式生物学重复。</small></span></label></div>
+      <div class="actions-row"><button id="calculateQpcr" class="button button-primary">计算 ΔΔCt 与统计结果</button></div>`;
   }
 
   function efficiencyFactor(gene) {
@@ -842,6 +1301,17 @@ const APP_VERSION = document.documentElement.dataset.appVersion || '2.12.0';
     return valid.length ? Math.exp(mean(valid.map(value => Math.log(value)))) : NaN;
   }
 
+  function missingReferenceCoverage() {
+    const stats = groupQpcrRows();
+    const available = new Set(stats.map(item => `${item.sample}|||${item.replicate}|||${item.gene}`));
+    const missing = new Set();
+    stats.filter(item => !qpcr.references.includes(item.gene)).forEach(item => {
+      const absent = qpcr.references.filter(reference => !available.has(`${item.sample}|||${item.replicate}|||${reference}`));
+      if (absent.length) missing.add(`${item.sample}${item.replicate ? ` / ${item.replicate}` : ''}（缺少 ${absent.join('、')}）`);
+    });
+    return [...missing];
+  }
+
   function calculateResults() {
     const stats = groupQpcrRows();
     const bySampleGene = new Map(stats.map(item => [`${item.sample}|||${item.replicate}|||${item.gene}`, item]));
@@ -851,26 +1321,41 @@ const APP_VERSION = document.documentElement.dataset.appVersion || '2.12.0';
       const referenceStats = qpcr.references.map(reference => bySampleGene.get(`${item.sample}|||${item.replicate}|||${reference}`)).filter(Boolean);
       if (!referenceStats.length) return;
       const refCt = mean(referenceStats.map(reference => reference.meanCt));
+      const refSd = Math.sqrt(referenceStats.reduce((sum, reference) => sum + reference.ctSd ** 2, 0) / Math.max(referenceStats.length, 1));
       const dct = item.meanCt - refCt;
+      const uncertainty = Math.sqrt(item.ctSd ** 2 + refSd ** 2);
       if (!controlDct.has(item.gene)) controlDct.set(item.gene, []);
-      controlDct.get(item.gene).push(dct);
+      controlDct.get(item.gene).push({ dct, uncertainty });
     });
-    const controlStats = new Map([...controlDct.entries()].map(([gene, values]) => [gene, { mean: mean(values), sd: sd(values), n: values.length }]));
+    const controlStats = new Map([...controlDct.entries()].map(([gene, entries]) => {
+      const values = entries.map(entry => entry.dct);
+      const n = entries.length;
+      const betweenSem = n > 1 ? sd(values) / Math.sqrt(n) : 0;
+      const technicalSem = Math.sqrt(entries.reduce((sum, entry) => sum + entry.uncertainty ** 2, 0)) / Math.max(n, 1);
+      return [gene, {
+        mean: mean(values),
+        sd: sd(values),
+        uncertainty: Math.sqrt(betweenSem ** 2 + technicalSem ** 2),
+        n,
+      }];
+    }));
     const provisional = stats.filter(item => !qpcr.references.includes(item.gene)).map(item => {
       const referenceStats = qpcr.references.map(reference => bySampleGene.get(`${item.sample}|||${item.replicate}|||${reference}`)).filter(Boolean);
       const refCt = mean(referenceStats.map(reference => reference.meanCt));
       const refSd = Math.sqrt(referenceStats.reduce((sum, reference) => sum + reference.ctSd ** 2, 0) / Math.max(referenceStats.length, 1));
       const deltaCt = item.meanCt - refCt;
       const deltaCtSd = Math.sqrt(item.ctSd ** 2 + refSd ** 2);
+      const relativeExpression = Number.isFinite(deltaCt) ? 2 ** (-deltaCt) : NaN;
+      const relativeExpressionSd = Number.isFinite(relativeExpression) ? relativeExpression * Math.LN2 * deltaCtSd : NaN;
       const baseline = controlStats.get(item.gene);
       const deltaDeltaCt = baseline ? deltaCt - baseline.mean : NaN;
-      const deltaDeltaCtSd = baseline ? Math.sqrt(deltaCtSd ** 2 + baseline.sd ** 2) : NaN;
+      const deltaDeltaCtSd = baseline ? Math.sqrt(deltaCtSd ** 2 + baseline.uncertainty ** 2) : NaN;
       const foldChange = Number.isFinite(deltaDeltaCt) ? 2 ** (-deltaDeltaCt) : NaN;
       const foldChangeSd = Number.isFinite(foldChange) && Number.isFinite(deltaDeltaCtSd) ? foldChange * Math.LN2 * deltaDeltaCtSd : NaN;
       const targetQuantity = efficiencyFactor(item.gene) ** (-item.meanCt);
       const referenceQuantity = geometricMean(referenceStats.map(reference => efficiencyFactor(reference.gene) ** (-reference.meanCt)));
       const normalizedQuantity = targetQuantity / referenceQuantity;
-      return { ...item, refCt, deltaCt, deltaCtSd, deltaDeltaCt, deltaDeltaCtSd, foldChange, foldChangeSd, normalizedQuantity, baselineN: baseline?.n || 0 };
+      return { ...item, refCt, deltaCt, deltaCtSd, relativeExpression, relativeExpressionSd, deltaDeltaCt, deltaDeltaCtSd, foldChange, foldChangeSd, normalizedQuantity, baselineN: baseline?.n || 0 };
     });
     const efficiencyBaselines = new Map();
     provisional.forEach(item => {
@@ -884,6 +1369,7 @@ const APP_VERSION = document.documentElement.dataset.appVersion || '2.12.0';
       const efficiencyFold = Number.isFinite(efficiencyBaseline) && efficiencyBaseline > 0 ? item.normalizedQuantity / efficiencyBaseline : NaN;
       return { ...item, efficiencyFold, efficiencyBaselineN: baselineValues.length };
     }).sort((a, b) => a.gene.localeCompare(b.gene, 'zh-CN') || a.sample.localeCompare(b.sample, 'zh-CN') || a.replicate.localeCompare(b.replicate, 'zh-CN'));
+    qpcr.statistics = buildQpcrStatistics();
   }
 
   function biologicalSummaries() {
@@ -905,28 +1391,204 @@ const APP_VERSION = document.documentElement.dataset.appVersion || '2.12.0';
     })).sort((a, b) => a.gene.localeCompare(b.gene, 'zh-CN') || a.sample.localeCompare(b.sample, 'zh-CN'));
   }
 
+  function hasBiologicalReplicateMapping() {
+    if (!qpcr.mapping.replicate) return false;
+    const groups = new Map();
+    if (qpcr.results.length) {
+      qpcr.results.forEach(result => {
+        const key = `${result.sample}|||${result.gene}`;
+        if (!groups.has(key)) groups.set(key, new Set());
+        if (normalizeQpcrIdentifier(result.replicate)) groups.get(key).add(normalizeQpcrIdentifier(result.replicate));
+      });
+    } else {
+      validQpcrRows().forEach(row => {
+        const key = `${qValue(row, 'sample')}|||${qValue(row, 'gene')}`;
+        if (!groups.has(key)) groups.set(key, new Set());
+        const replicate = qValue(row, 'replicate');
+        if (replicate) groups.get(key).add(replicate);
+      });
+    }
+    return [...groups.values()].some(replicates => replicates.size >= 2);
+  }
+
+  function qpcrRowSortValue(row, fallback) {
+    const point = qpcrWellCoordinates(row);
+    return point ? point.row * 12 + point.column : fallback;
+  }
+
+  function technicalPseudoPoints() {
+    const groups = new Map();
+    validQpcrRows().forEach((row, rowIndex) => {
+      const sample = qValue(row, 'sample');
+      const gene = qValue(row, 'gene');
+      const key = `${sample}|||${gene}`;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push({ row, rowIndex, ct: qValue(row, 'ct') });
+    });
+    groups.forEach(values => values.sort((left, right) => qpcrRowSortValue(left.row, left.rowIndex) - qpcrRowSortValue(right.row, right.rowIndex)));
+    const points = [];
+    getSamples().forEach(sample => {
+      const referenceSets = qpcr.references.map(reference => groups.get(`${sample}|||${reference}`) || []);
+      if (!referenceSets.length || referenceSets.some(values => !values.length)) return;
+      getGenes().filter(gene => !qpcr.references.includes(gene)).forEach(gene => {
+        const targets = groups.get(`${sample}|||${gene}`) || [];
+        const count = Math.min(targets.length, ...referenceSets.map(values => values.length));
+        for (let index = 0; index < count; index += 1) {
+          const referenceCt = mean(referenceSets.map(values => values[index].ct));
+          const deltaCt = targets[index].ct - referenceCt;
+          points.push({
+            sample,
+            gene,
+            replicate: `技术孔 ${index + 1}`,
+            deltaCt,
+            referenceCt,
+            targetCt: targets[index].ct,
+          });
+        }
+      });
+    });
+    const baselines = new Map();
+    points.forEach(point => {
+      if (!qpcr.controls.includes(point.sample)) return;
+      if (!baselines.has(point.gene)) baselines.set(point.gene, []);
+      baselines.get(point.gene).push(point.deltaCt);
+    });
+    return points.map(point => {
+      const baseline = mean(baselines.get(point.gene) || []);
+      const deltaDeltaCt = point.deltaCt - baseline;
+      return {
+        ...point,
+        deltaDeltaCt,
+        foldChange: Number.isFinite(deltaDeltaCt) ? 2 ** (-deltaDeltaCt) : NaN,
+      };
+    });
+  }
+
+  function buildQpcrStatistics() {
+    const biologicalMode = hasBiologicalReplicateMapping();
+    const useTechnical = qpcr.technicalAsIndependent && !biologicalMode;
+    const pseudoPoints = useTechnical ? technicalPseudoPoints() : [];
+    const targetGenes = [...new Set(qpcr.results.map(result => result.gene))];
+    return targetGenes.map(gene => {
+      const groupMap = new Map();
+      const addPoint = (sample, deltaCt, foldChange, propagatedError = NaN, technicalN = 1) => {
+        if (!groupMap.has(sample)) groupMap.set(sample, { sample, deltaCtValues: [], foldValues: [], propagatedErrors: [], technicalN: 0 });
+        const group = groupMap.get(sample);
+        if (Number.isFinite(deltaCt)) group.deltaCtValues.push(deltaCt);
+        if (Number.isFinite(foldChange)) group.foldValues.push(foldChange);
+        if (Number.isFinite(propagatedError)) group.propagatedErrors.push(propagatedError);
+        group.technicalN += technicalN;
+      };
+      if (useTechnical) {
+        pseudoPoints.filter(point => point.gene === gene).forEach(point => addPoint(point.sample, point.deltaCt, point.foldChange, NaN, 1));
+      } else {
+        qpcr.results.filter(result => result.gene === gene).forEach(result => (
+          addPoint(result.sample, result.deltaCt, result.foldChange, result.foldChangeSd, result.n)
+        ));
+      }
+      const groups = [...groupMap.values()].map(group => ({
+        ...group,
+        n: group.foldValues.length,
+        meanFold: mean(group.foldValues),
+        sdFold: sd(group.foldValues),
+        semFold: group.foldValues.length > 1 ? sd(group.foldValues) / Math.sqrt(group.foldValues.length) : NaN,
+        propagatedError: mean(group.propagatedErrors),
+      }));
+      const mode = useTechnical ? 'technical-exploratory' : biologicalMode ? 'biological' : 'descriptive';
+      const canInfer = mode !== 'descriptive' && groups.length >= 2 && groups.every(group => group.deltaCtValues.length >= 2);
+      const comparisons = [];
+      if (canInfer) {
+        for (let leftIndex = 0; leftIndex < groups.length; leftIndex += 1) {
+          for (let rightIndex = leftIndex + 1; rightIndex < groups.length; rightIndex += 1) {
+            const left = groups[leftIndex];
+            const right = groups[rightIndex];
+            const comparison = welchComparison(left.deltaCtValues, right.deltaCtValues);
+            comparisons.push({
+              left: left.sample,
+              right: right.sample,
+              p: comparison.p,
+              t: comparison.t,
+              df: comparison.df,
+            });
+          }
+        }
+        holmAdjust(comparisons);
+      }
+      const orderedSamples = [...groups].sort((left, right) => right.meanFold - left.meanFold).map(group => group.sample);
+      const significantPairs = comparisons.filter(item => item.adjustedP < qpcr.significanceAlpha).map(item => [item.left, item.right]);
+      const letters = canInfer ? compactLetterDisplay(groups.map(group => group.sample), significantPairs, orderedSamples) : {};
+      groups.forEach(group => { group.letter = letters[group.sample] || '—'; });
+      return {
+        gene,
+        mode,
+        canInfer,
+        groups,
+        comparisons,
+        method: canInfer ? 'ΔCt 上两两 Welch t 检验 + Holm 多重比较校正' : '描述性统计',
+        warning: mode === 'technical-exploratory'
+          ? '技术重复被临时视为独立重复；属于伪重复探索性分析，不能替代生物学重复。'
+          : mode === 'descriptive'
+            ? '未检测到至少 2 个独立生物学重复；不计算推断性 p 值或字母分组。'
+            : groups.some(group => group.n < 3)
+              ? '部分组的独立生物学重复少于 3，统计功效较低，请谨慎解释。'
+              : '',
+      };
+    });
+  }
+
+  function statisticsForGene(gene) {
+    return (qpcr.statistics || []).find(item => item.gene === gene);
+  }
+
+  function qpcrStatisticsHtml() {
+    const rows = (qpcr.statistics || []).filter(item => qpcr.resultGene === 'all' || item.gene === qpcr.resultGene);
+    if (!rows.length) return '<div class="empty-state">没有可汇总的统计结果。</div>';
+    return rows.map(item => {
+      const modeLabel = item.mode === 'biological' ? '独立生物学重复' : item.mode === 'technical-exploratory' ? '技术重复探索性分析' : '仅描述性统计';
+      const groupRows = item.groups.map(group => `<tr><td>${escapeHtml(group.sample)}</td><td>${item.mode === 'descriptive' ? group.technicalN : group.n}</td><td>${fmt(group.meanFold, 4)}</td><td>${item.mode === 'descriptive' ? fmt(group.propagatedError, 4) : fmt(group.sdFold, 4)}</td><td>${item.mode === 'descriptive' ? '—' : fmt(group.semFold, 4)}</td><td>${group.letter}</td></tr>`).join('');
+      const comparisonRows = item.comparisons.length
+        ? item.comparisons.map(comparison => `<tr><td>${escapeHtml(comparison.left)} vs ${escapeHtml(comparison.right)}</td><td>${fmt(comparison.t, 3)}</td><td>${fmt(comparison.df, 2)}</td><td>${Number.isFinite(comparison.adjustedP) ? comparison.adjustedP.toExponential(3) : '—'}</td><td>${comparison.adjustedP < qpcr.significanceAlpha ? '显著' : '不显著'}</td></tr>`).join('')
+        : '<tr><td colspan="5">当前重复层级不足以进行推断性差异检验。</td></tr>';
+      return `<section class="qpcr-stat-card ${item.mode}"><div class="qpcr-stat-heading"><div><h4>${escapeHtml(item.gene)}</h4><p>${escapeHtml(item.method)}</p></div><span class="pill ${item.canInfer ? 'good' : 'warn'}">${modeLabel}</span></div>${item.warning ? `<p class="qpcr-stat-warning">${escapeHtml(item.warning)}</p>` : ''}<div class="qpcr-stat-grid"><div class="table-wrap"><table><thead><tr><th>组</th><th>N</th><th>均值 FC</th><th>${item.mode === 'descriptive' ? '传播误差' : 'SD'}</th><th>SEM</th><th>字母</th></tr></thead><tbody>${groupRows}</tbody></table></div><div class="table-wrap"><table><thead><tr><th>比较</th><th>Welch t</th><th>df</th><th>Holm 校正 p</th><th>结论</th></tr></thead><tbody>${comparisonRows}</tbody></table></div></div></section>`;
+    }).join('');
+  }
+
+  function visibleQpcrResults() {
+    return qpcr.resultGene === 'all' ? qpcr.results : qpcr.results.filter(result => result.gene === qpcr.resultGene);
+  }
+
   function resultTableHtml() {
-    if (!qpcr.results.length) return '<tr class="empty-row"><td colspan="13">没有可计算的结果。请确认内参、对照样本和有效 Ct 数据。</td></tr>';
-    return qpcr.results.map(result => `<tr><td>${escapeHtml(result.sample)}${qpcr.controls.includes(result.sample) ? ' <span class="pill info">对照</span>' : ''}</td><td>${escapeHtml(result.replicate || '—')}</td><td><b>${escapeHtml(result.gene)}</b></td><td>${result.n}</td><td>${fmt(result.meanCt)}</td><td>${fmt(result.ctSd)}</td><td>${fmt(result.refCt)}</td><td>${fmt(result.deltaCt)} ± ${fmt(result.deltaCtSd)}</td><td>${fmt(result.deltaDeltaCt)} ± ${fmt(result.deltaDeltaCtSd)}</td><td><b>${fmt(result.foldChange, 4)}</b></td><td><b>${fmt(result.efficiencyFold, 4)}</b></td><td>${fmt(result.foldChangeSd, 4)}</td><td>${result.baselineN ? `${result.baselineN} 个对照重复` : '—'}</td></tr>`).join('');
+    const results = visibleQpcrResults();
+    if (!results.length) return '<tr class="empty-row"><td colspan="14">没有可计算的结果。请确认内参、对照样本和有效 Ct 数据。</td></tr>';
+    return results.map(result => `<tr><td>${escapeHtml(result.sample)}${qpcr.controls.includes(result.sample) ? ' <span class="pill info">对照</span>' : ''}</td><td>${escapeHtml(result.replicate || '—')}</td><td><b>${escapeHtml(result.gene)}</b></td><td>${result.n}</td><td>${fmt(result.meanCt)}</td><td>${fmt(result.ctSd)}</td><td>${fmt(result.refCt)}</td><td>${fmt(result.deltaCt)} ± ${fmt(result.deltaCtSd)}</td><td><b>${fmt(result.relativeExpression, 5)}</b> ± ${fmt(result.relativeExpressionSd, 5)}</td><td>${fmt(result.deltaDeltaCt)} ± ${fmt(result.deltaDeltaCtSd)}</td><td><b>${fmt(result.foldChange, 4)}</b></td><td><b>${fmt(result.efficiencyFold, 4)}</b></td><td>${fmt(result.foldChangeSd, 4)}</td><td>${result.baselineN ? `${result.baselineN} 个对照重复` : '—'}</td></tr>`).join('');
   }
 
   function biologicalSummaryHtml() {
-    const rows = biologicalSummaries();
+    const rows = biologicalSummaries().filter(row => qpcr.resultGene === 'all' || row.gene === qpcr.resultGene);
     if (!rows.length) return '<tr class="empty-row"><td colspan="8">没有生物学重复汇总。</td></tr>';
     return rows.map(row => `<tr><td>${escapeHtml(row.sample)}</td><td><b>${escapeHtml(row.gene)}</b></td><td>${row.n}</td><td>${fmt(row.meanFold, 4)}</td><td>${fmt(row.sdFold, 4)}</td><td>${fmt(row.semFold, 4)}</td><td>${fmt(row.meanEfficiencyFold, 4)}</td><td>${fmt(row.sdEfficiencyFold, 4)}</td></tr>`).join('');
   }
 
   function stepHtmlResults() {
+    qpcr.statistics = buildQpcrStatistics();
     const up = qpcr.results.filter(result => result.foldChange > 1.5).length;
     const down = qpcr.results.filter(result => result.foldChange < 0.67).length;
     const targetGenes = [...new Set(qpcr.results.map(result => result.gene))];
+    const modes = new Set(qpcr.statistics.map(item => item.mode));
+    const descriptiveOnly = modes.size === 1 && modes.has('descriptive');
+    const chartErrorLabel = descriptiveOnly ? '传播技术误差' : qpcr.chartError.toUpperCase();
+    const analysisNotice = modes.has('technical-exploratory')
+      ? '<div class="qpcr-analysis-notice technical-exploratory"><b>探索性伪重复模式已启用</b><span>统计单位为技术孔；风险提示仅保留在软件结果页，导出的表格和图片不附加例外模式标识。</span></div>'
+      : modes.has('biological')
+        ? '<div class="qpcr-analysis-notice biological"><b>正式生物学重复分析</b><span>技术孔先在样本内合并；差异检验在独立生物学重复的 ΔCt 上完成。</span></div>'
+        : '<div class="qpcr-analysis-notice descriptive"><b>仅描述性结果</b><span>未检测到独立生物学重复；显示技术误差，但不生成 p 值或 a/b/c/d。</span></div>';
     return `
-      <div class="step-header"><div><h3>相对表达结果</h3><p>同时给出 Livak 2<sup>−ΔΔCt</sup> 与按各基因扩增效率校正的相对表达量；100% 效率时两者应接近。</p></div><div class="actions-row compact"><button id="saveQpcrToLibrary" class="button button-ghost">保存到知识库</button><button id="exportQpcr" class="button button-secondary">导出结果 CSV</button></div></div>
+      <div class="step-header"><div><h3>相对表达结果</h3><p>2<sup>−ΔCt</sup> 表示各样本相对内参的归一化表达；Livak 2<sup>−ΔΔCt</sup> 再相对对照组归一化。另给出按各基因扩增效率校正的组间 Fold change。</p></div><div class="actions-row compact"><button id="saveQpcrToLibrary" class="button button-ghost">保存到知识库</button><button id="exportQpcr" class="button button-secondary">导出结果 CSV</button></div></div>
+      ${analysisNotice}
       <div class="result-cards"><div class="metric-card"><strong>${qpcr.results.length}</strong><span>样本 × 靶基因比较</span></div><div class="metric-card"><strong>${targetGenes.length}</strong><span>靶基因</span></div><div class="metric-card up"><strong>↑ ${up}</strong><span>上调（FC &gt; 1.5）</span></div><div class="metric-card down"><strong>↓ ${down}</strong><span>下调（FC &lt; 0.67）</span></div></div>
-      <div class="result-tabs"><button class="result-tab ${qpcr.resultView === 'table' ? 'active' : ''}" data-result-view="table">结果表</button><button class="result-tab ${qpcr.resultView === 'chart' ? 'active' : ''}" data-result-view="chart">柱状图</button></div>
-      <div id="resultTablePanel" class="${qpcr.resultView === 'table' ? '' : 'hide'}"><div class="table-wrap"><table><thead><tr><th>样本 / 组</th><th>生物学重复</th><th>基因</th><th>技术重复 N</th><th>Mean Ct</th><th>Ct SD</th><th>Ref Ct</th><th>ΔCt</th><th>ΔΔCt</th><th>Livak FC</th><th>效率校正 FC</th><th>传播误差</th><th>基线</th></tr></thead><tbody>${resultTableHtml()}</tbody></table></div><h4>生物学重复汇总</h4><p class="muted">仅当已映射“生物学重复”列时，N、SD 和 SEM 才代表独立生物学重复；未映射时 N 通常为 1。</p><div class="table-wrap"><table><thead><tr><th>样本 / 组</th><th>基因</th><th>生物学 N</th><th>Livak 均值</th><th>SD</th><th>SEM</th><th>效率校正均值</th><th>效率校正 SD</th></tr></thead><tbody>${biologicalSummaryHtml()}</tbody></table></div></div>
-      <div id="resultChartPanel" class="chart-panel ${qpcr.resultView === 'chart' ? '' : 'hide'}"><canvas id="qpcrChart"></canvas></div>
-      <div class="actions-row"><button id="reconfigureQpcr" class="button button-ghost">返回质控与设置</button><span class="muted">提示：显著性检验需依据实验设计另行选择统计方法；本工具不将技术重复直接作为生物学重复。</span></div>`;
+      <div class="qpcr-result-toolbar"><div class="result-tabs"><button class="result-tab ${qpcr.resultView === 'table' ? 'active' : ''}" data-result-view="table">结果与统计</button><button class="result-tab ${qpcr.resultView === 'chart' ? 'active' : ''}" data-result-view="chart">期刊风格柱状图</button></div><div class="qpcr-chart-controls"><label>查看基因<select id="qpcrResultGene"><option value="all" ${qpcr.resultGene === 'all' ? 'selected' : ''}>全部靶基因</option>${targetGenes.map(gene => `<option value="${escapeHtml(gene)}" ${qpcr.resultGene === gene ? 'selected' : ''}>${escapeHtml(gene)}</option>`).join('')}</select></label><label>误差棒<select id="qpcrChartError" ${descriptiveOnly ? 'disabled title="没有独立重复时仅显示传播技术误差"' : ''}><option value="sd" ${qpcr.chartError === 'sd' ? 'selected' : ''}>SD</option><option value="sem" ${qpcr.chartError === 'sem' ? 'selected' : ''}>SEM</option></select></label><button id="toggleQpcrChartTheme" class="button button-secondary" type="button">${qpcr.chartTheme === 'mono' ? '切换彩色' : '切换黑白'}</button></div></div>
+      <div id="resultTablePanel" class="${qpcr.resultView === 'table' ? '' : 'hide'}"><div class="table-wrap"><table><thead><tr><th>样本 / 组</th><th>生物学重复</th><th>基因</th><th>技术重复 N</th><th>Mean Ct</th><th>Ct SD</th><th>Ref Ct</th><th>ΔCt</th><th>相对内参表达 2<sup>−ΔCt</sup></th><th>ΔΔCt</th><th>Livak FC</th><th>效率校正 FC</th><th>传播误差</th><th>基线</th></tr></thead><tbody>${resultTableHtml()}</tbody></table></div><h3 class="qpcr-stat-title">差异分析与重复层级汇总</h3>${qpcrStatisticsHtml()}</div>
+      <div id="resultChartPanel" class="chart-panel qpcr-journal-panel ${qpcr.resultView === 'chart' ? '' : 'hide'}"><div class="qpcr-journal-heading"><div><b>Relative gene expression</b><span>Mean ± ${chartErrorLabel} · 数字/英文 Times New Roman，中文宋体回退</span></div><button id="exportQpcrChartPng" class="button button-secondary" type="button">导出 PNG</button></div><div class="qpcr-chart-canvas-wrap"><canvas id="qpcrChart"></canvas></div></div>`;
   }
 
   function renderQpcr() {
@@ -934,16 +1596,54 @@ const APP_VERSION = document.documentElement.dataset.appVersion || '2.12.0';
       const step = Number(element.dataset.step);
       element.classList.toggle('active', step === qpcr.step);
       element.classList.toggle('done', step < qpcr.step);
+      element.classList.toggle('available', step === 1 || (step === 2 && qpcr.rows.length) || (step === 3 && qpcr.rows.length && hasMapping()) || (step === 4 && qpcr.results.length));
+      element.setAttribute('role', 'button');
+      element.tabIndex = 0;
+      element.onclick = () => navigateQpcrStep(step);
+      element.onkeydown = event => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          navigateQpcrStep(step);
+        }
+      };
     });
     qpcrHost.innerHTML = qpcr.step === 1 ? stepHtmlImport() : qpcr.step === 2 ? stepHtmlMapping() : qpcr.step === 3 ? stepHtmlQcConfig() : stepHtmlResults();
     bindQpcrStep();
     if (qpcr.step === 4 && qpcr.resultView === 'chart') setTimeout(renderQpcrChart, 0);
   }
 
+  function navigateQpcrStep(targetStep) {
+    if (targetStep === qpcr.step) return;
+    if (targetStep === 1) {
+      qpcr.step = 1;
+      renderQpcr();
+      return;
+    }
+    if (!qpcr.rows.length) return toastMessage('请先在第 1 步导入 qPCR 数据。');
+    if (targetStep === 2) {
+      qpcr.step = 2;
+      renderQpcr();
+      return;
+    }
+    if (!hasMapping()) return toastMessage('请先在第 2 步完整匹配样本、基因和 Ct/Cq 列。');
+    if (targetStep === 3) {
+      defaultConfiguration();
+      qpcr.step = 3;
+      renderQpcr();
+      return;
+    }
+    if (!qpcr.results.length) return toastMessage('请先在第 3 步完成内参、对照和质控设置并计算结果。');
+    qpcr.step = 4;
+    renderQpcr();
+  }
+
   function bindQpcrStep() {
     if (qpcr.step === 1) {
       const area = $('#qpcrUploadArea');
       const input = $('#qpcrFileInput');
+      $('#qpcrProjectName')?.addEventListener('change', event => {
+        qpcr.projectName = event.target.value.trim() || '未命名 qPCR 项目';
+      });
       ['dragenter', 'dragover'].forEach(eventName => area.addEventListener(eventName, event => { event.preventDefault(); area.classList.add('dragover'); }));
       ['dragleave', 'drop'].forEach(eventName => area.addEventListener(eventName, event => { event.preventDefault(); area.classList.remove('dragover'); }));
       area.addEventListener('drop', event => { const file = event.dataTransfer.files[0]; if (file) loadQpcrFile(file); });
@@ -953,26 +1653,260 @@ const APP_VERSION = document.documentElement.dataset.appVersion || '2.12.0';
       $$('[data-map]').forEach(select => select.addEventListener('change', event => { qpcr.mapping[event.target.dataset.map] = event.target.value; renderQpcr(); }));
       $('#confirmMapping').addEventListener('click', () => {
         if (!hasMapping()) return toastMessage('请完整选择样本、基因和 Ct/Cq 三列。');
-        if (!validQpcrRows().length) return toastMessage('未找到有效数据，请检查列匹配与 Ct 数值。');
+        const numericRows = qpcr.rows.filter(row => Number.isFinite(rawQValue(row, 'ct')));
+        if (!numericRows.length) return toastMessage('未找到有效 Ct/Cq 数值，请检查列匹配。');
         defaultConfiguration(); qpcr.step = 3; renderQpcr();
+        if (!validQpcrRows().length) toastMessage('Ct 数据已读入；样本或基因名称为空，请先使用整板模板或批量标注。');
       });
-      $('#resetQpcr').addEventListener('click', () => { qpcr.step = 1; renderQpcr(); });
     }
     if (qpcr.step === 3) {
+      $('#clearQpcrExampleHint')?.addEventListener('click', () => { qpcr.exampleKind = ''; renderQpcr(); });
       $$('[data-qc]').forEach(input => input.addEventListener('change', event => { qpcr.qc[event.target.dataset.qc] = number(event.target.value, qpcr.qc[event.target.dataset.qc]); renderQpcr(); }));
+      $$('[data-qc-view]').forEach(button => button.addEventListener('click', () => { qpcr.qcView = button.dataset.qcView; renderQpcr(); }));
       $$('[data-use]').forEach(input => input.addEventListener('change', event => { const row = qpcr.rows.find(item => item.id === event.target.dataset.use); row.use = event.target.checked; renderQpcr(); }));
       $$('[data-ct]').forEach(input => input.addEventListener('change', event => { const row = qpcr.rows.find(item => item.id === event.target.dataset.ct); row.cells[qpcr.mapping.ct] = event.target.value; renderQpcr(); }));
-      $$('[data-reference]').forEach(button => button.addEventListener('click', () => { const gene = button.dataset.reference; qpcr.references = qpcr.references.includes(gene) ? qpcr.references.filter(item => item !== gene) : [...qpcr.references, gene]; renderQpcr(); }));
+      $$('[data-qpcr-text-row]').forEach(input => input.addEventListener('change', event => {
+        const row = qpcr.rows.find(item => item.id === event.target.dataset.qpcrTextRow);
+        const key = event.target.dataset.qpcrTextKey;
+        if (row && ['sample', 'gene'].includes(key)) row.cells[qpcr.mapping[key]] = normalizeQpcrIdentifier(event.target.value);
+        qpcr.results = [];
+        renderQpcr();
+      }));
+      const plate = $('.qpcr-plate');
+      if (plate) {
+        let dragSelection = null;
+        const finishPlateSelection = () => {
+          if (!dragSelection) return;
+          dragSelection = null;
+          renderQpcr();
+        };
+        const extendPlateSelection = rowId => {
+          if (!dragSelection) return;
+          qpcr.selectedRowIds = qpcrRectangleSelection(dragSelection.startId, rowId, dragSelection.baseIds);
+          qpcr.selectedRowId = rowId;
+          updateQpcrPlateSelectionClasses(plate);
+        };
+        plate.addEventListener('pointerdown', event => {
+          const button = event.target.closest('[data-plate-row]');
+          if (!button || event.button !== 0) return;
+          event.preventDefault();
+          const rowId = button.dataset.plateRow;
+          if ((event.ctrlKey || event.metaKey) && !event.shiftKey) {
+            const selected = new Set(qpcr.selectedRowIds || []);
+            if (selected.has(rowId)) selected.delete(rowId);
+            else selected.add(rowId);
+            qpcr.selectedRowIds = [...selected];
+            qpcr.selectedRowId = rowId;
+            qpcr.selectionAnchorId = rowId;
+            updateQpcrPlateSelectionClasses(plate);
+            dragSelection = { toggled: true };
+          } else {
+            const startId = event.shiftKey && qpcr.selectionAnchorId ? qpcr.selectionAnchorId : rowId;
+            const baseIds = event.shiftKey && (event.ctrlKey || event.metaKey) ? [...(qpcr.selectedRowIds || [])] : [];
+            dragSelection = { startId, baseIds };
+            if (!event.shiftKey) qpcr.selectionAnchorId = rowId;
+            extendPlateSelection(rowId);
+          }
+          window.addEventListener('pointerup', finishPlateSelection, { once: true });
+        });
+        plate.addEventListener('pointerover', event => {
+          if (!dragSelection || dragSelection.toggled) return;
+          const button = event.target.closest('[data-plate-row]');
+          if (button) extendPlateSelection(button.dataset.plateRow);
+        });
+        $$('[data-plate-row]').forEach(button => button.addEventListener('click', event => {
+          if (event.detail !== 0) return;
+          const rowId = button.dataset.plateRow;
+          const selected = new Set(qpcr.selectedRowIds || []);
+          if (event.ctrlKey || event.metaKey) {
+            if (selected.has(rowId)) selected.delete(rowId);
+            else selected.add(rowId);
+            qpcr.selectedRowIds = [...selected];
+          } else if (event.shiftKey && qpcr.selectionAnchorId) {
+            qpcr.selectedRowIds = qpcrRectangleSelection(qpcr.selectionAnchorId, rowId);
+          } else {
+            qpcr.selectedRowIds = [rowId];
+            qpcr.selectionAnchorId = rowId;
+          }
+          qpcr.selectedRowId = rowId;
+          renderQpcr();
+        }));
+      }
+      $('#applySelectedQpcrAnnotation')?.addEventListener('click', () => {
+        const selectedRows = selectedQpcrRows();
+        const sample = normalizeQpcrIdentifier($('#qpcrSelectedSample')?.value);
+        const gene = normalizeQpcrIdentifier($('#qpcrSelectedGene')?.value);
+        const role = $('#qpcrSelectedRole')?.value || 'keep';
+        if (!selectedRows.length) return toastMessage('请先在 96 孔板上选择一个或多个孔。');
+        if (!sample && !gene && role === 'keep') return toastMessage('请填写样本名、基因名，或选择要设置的基因角色。');
+        selectedRows.forEach(row => {
+          if (sample) row.cells[qpcr.mapping.sample] = sample;
+          if (gene) row.cells[qpcr.mapping.gene] = gene;
+        });
+        const affectedGenes = [...new Set(selectedRows.map(row => gene || rawQValue(row, 'gene')).filter(Boolean))];
+        if (role === 'reference') affectedGenes.forEach(name => {
+          if (!qpcr.references.includes(name)) qpcr.references.push(name);
+        });
+        if (role === 'target') qpcr.references = qpcr.references.filter(name => !affectedGenes.includes(name));
+        affectedGenes.forEach(name => {
+          if (!Number.isFinite(number(qpcr.efficiencies[name]))) qpcr.efficiencies[name] = 100;
+        });
+        qpcr.selectedRowIds = [];
+        qpcr.selectedRowId = '';
+        qpcr.results = [];
+        renderQpcr();
+        toastMessage(`已更新 ${selectedRows.length} 个选中孔${role === 'reference' ? '，并设为内参' : role === 'target' ? '，并设为靶基因' : ''}。`);
+      });
+      $('#excludeSelectedQpcrWells')?.addEventListener('click', () => {
+        selectedQpcrRows().forEach(row => { row.use = false; });
+        renderQpcr();
+      });
+      $('#includeSelectedQpcrWells')?.addEventListener('click', () => {
+        selectedQpcrRows().forEach(row => { row.use = true; });
+        renderQpcr();
+      });
+      $('#clearQpcrWellSelection')?.addEventListener('click', () => {
+        qpcr.selectedRowIds = [];
+        qpcr.selectedRowId = '';
+        qpcr.selectionAnchorId = '';
+        renderQpcr();
+      });
+      $('#qpcrFlaggedOnly')?.addEventListener('change', event => { qpcr.flaggedOnly = event.target.checked; renderQpcr(); });
+      $('#excludeFlaggedQpcr')?.addEventListener('click', () => {
+        const flaggedIds = new Set(qpcr.rows.filter(row => row.use && rowFlag(row)).map(row => row.id));
+        qpcr.rows.forEach(row => { if (flaggedIds.has(row.id)) row.use = false; });
+        renderQpcr();
+      });
+      $('#useAllQpcr')?.addEventListener('click', () => {
+        qpcr.rows.forEach(row => { row.use = true; });
+        renderQpcr();
+      });
+      $('#applyQpcrAnnotation')?.addEventListener('click', () => {
+        const wells = parseQpcrWellSelection($('#qpcrAnnotationWells')?.value);
+        const sample = normalizeQpcrIdentifier($('#qpcrAnnotationSample')?.value);
+        const gene = normalizeQpcrIdentifier($('#qpcrAnnotationGene')?.value);
+        const role = $('#qpcrAnnotationRole')?.value;
+        if (!wells.size) return toastMessage('请填写有效孔位，例如 A01-A03。');
+        if (!sample) return toastMessage('请填写这些孔所属的样本 / 组名称。');
+        if (!gene) return toastMessage('请填写这些孔的基因名称。');
+        let changed = 0;
+        qpcr.rows.forEach(row => {
+          if (!wells.has(normalizeWell(rawQValue(row, 'well')))) return;
+          row.cells[qpcr.mapping.sample] = sample;
+          row.cells[qpcr.mapping.gene] = gene;
+          changed += 1;
+        });
+        if (!changed) return toastMessage('没有找到所填孔位，请核对 Well 列映射。');
+        if (role === 'reference' && !qpcr.references.includes(gene)) qpcr.references.push(gene);
+        if (!Number.isFinite(number(qpcr.efficiencies[gene]))) qpcr.efficiencies[gene] = 100;
+        qpcr.results = [];
+        renderQpcr();
+        toastMessage(`已标注 ${changed} 个孔：${sample} / ${gene}${role === 'reference' ? '（内参）' : ''}`);
+      });
+      $('#applyQpcrPlateTemplate')?.addEventListener('click', () => {
+        const samples = parseQpcrLabelList($('#qpcrTemplateSamples')?.value);
+        const genes = parseQpcrLabelList($('#qpcrTemplateGenes')?.value);
+        const replicates = clamp(Math.round(number($('#qpcrTemplateReplicates')?.value, 3)), 1, 12);
+        const reference = normalizeQpcrIdentifier($('#qpcrTemplateReference')?.value);
+        if (!samples.length || samples.length > 8) return toastMessage('请按 A→H 顺序填写 1–8 个样本名称。');
+        if (!genes.length) return toastMessage('请按左→右顺序填写基因名称。');
+        if (genes.length * replicates > 12) return toastMessage(`当前设置需要 ${genes.length * replicates} 列，超过 96 孔板每行 12 列。`);
+        if (!reference || !genes.includes(reference)) return toastMessage('请填写一个出现在基因列表中的内参基因名称。');
+        let changed = 0;
+        qpcr.rows.forEach(row => {
+          const well = normalizeWell(rawQValue(row, 'well'));
+          const match = well.match(/^([A-H])(\d{1,2})$/);
+          if (!match) return;
+          const sampleIndex = match[1].charCodeAt(0) - 65;
+          const geneIndex = Math.floor((Number(match[2]) - 1) / replicates);
+          if (!samples[sampleIndex] || !genes[geneIndex]) return;
+          row.cells[qpcr.mapping.sample] = samples[sampleIndex];
+          row.cells[qpcr.mapping.gene] = genes[geneIndex];
+          changed += 1;
+        });
+        if (!changed) return toastMessage('没有匹配到孔位，请核对 Well 列映射。');
+        if (!qpcr.references.includes(reference)) qpcr.references.push(reference);
+        genes.forEach(gene => {
+          if (!Number.isFinite(number(qpcr.efficiencies[gene]))) qpcr.efficiencies[gene] = 100;
+        });
+        qpcr.controls = qpcr.controls.filter(sample => samples.includes(sample));
+        if (!qpcr.controls.length) qpcr.controls = [samples[0]];
+        qpcr.results = [];
+        renderQpcr();
+        toastMessage(`已按整板模板标注 ${changed} 个孔；内参为 ${reference}，默认对照为 ${samples[0]}。`);
+      });
+      $('#fillBlankQpcrSamples')?.addEventListener('click', () => {
+        const label = normalizeQpcrIdentifier($('#qpcrBlankSampleLabel')?.value);
+        if (!label) return toastMessage('请先填写要使用的样本 / 组名称。');
+        qpcr.rows.forEach(row => {
+          if (!rawQValue(row, 'sample') && rawQValue(row, 'gene') && Number.isFinite(rawQValue(row, 'ct'))) {
+            row.cells[qpcr.mapping.sample] = label;
+          }
+        });
+        qpcr.results = [];
+        renderQpcr();
+        toastMessage(`已把空白样本行归入“${label}”，请再次核对后计算。`);
+      });
+      $('#useTargetPrefixGrouping')?.addEventListener('click', () => {
+        qpcr.groupingMode = 'target-prefix';
+        qpcr.references = qpcr.references.filter(gene => getGenes().includes(gene));
+        qpcr.controls = [qpcr.prefixBaselineLabel];
+        qpcr.results = [];
+        renderQpcr();
+        toastMessage('已按 Target 前缀重建分组，请确认内参和对照组后再计算。');
+      });
+      $('#useSampleColumnGrouping')?.addEventListener('click', () => {
+        qpcr.groupingMode = 'sample';
+        qpcr.references = qpcr.references.filter(gene => getGenes().includes(gene));
+        qpcr.controls = qpcr.controls.filter(sample => getSamples().includes(sample));
+        qpcr.results = [];
+        renderQpcr();
+      });
+      $('#qpcrPrefixBaselineLabel')?.addEventListener('change', event => {
+        const previous = qpcr.prefixBaselineLabel;
+        const next = normalizeQpcrIdentifier(event.target.value) || 'CONTROL';
+        qpcr.prefixBaselineLabel = next;
+        qpcr.controls = qpcr.controls.map(sample => sample === previous ? next : sample);
+        if (!qpcr.controls.length) qpcr.controls = [next];
+        qpcr.results = [];
+        renderQpcr();
+      });
+      $('#addQpcrReference')?.addEventListener('click', () => {
+        const gene = $('#qpcrReferenceSelect')?.value;
+        if (gene && !qpcr.references.includes(gene)) qpcr.references.push(gene);
+        renderQpcr();
+      });
+      $$('[data-remove-reference]').forEach(button => button.addEventListener('click', () => {
+        qpcr.references = qpcr.references.filter(item => item !== button.dataset.removeReference);
+        renderQpcr();
+      }));
       $$('[data-control]').forEach(button => button.addEventListener('click', () => { const sample = button.dataset.control; qpcr.controls = qpcr.controls.includes(sample) ? qpcr.controls.filter(item => item !== sample) : [...qpcr.controls, sample]; renderQpcr(); }));
       $$('[data-efficiency-gene]').forEach(input => input.addEventListener('change', event => {
         const gene = event.target.dataset.efficiencyGene;
         qpcr.efficiencies[gene] = clamp(number(event.target.value, 100), 1, 150);
         renderQpcr();
       }));
-      $('#backToMapping').addEventListener('click', () => { qpcr.step = 2; renderQpcr(); });
+      $('#qpcrTechnicalAsIndependent')?.addEventListener('change', event => {
+        const checked = event.target.checked;
+        if (checked && !window.confirm('该模式会把同一样本的技术孔当作独立重复进行探索性检验，属于伪重复，不能替代生物学重复。仅在你确认需要时启用。是否继续？')) {
+          event.target.checked = false;
+          return;
+        }
+        qpcr.technicalAsIndependent = checked;
+        qpcr.results = [];
+        qpcr.statistics = [];
+        renderQpcr();
+      });
       $('#calculateQpcr').addEventListener('click', () => {
         if (!qpcr.references.length) return toastMessage('请至少选择一个内参基因。');
         if (!qpcr.controls.length) return toastMessage('请至少选择一个对照样本。');
+        const missingReferences = missingReferenceCoverage();
+        if (missingReferences.length) {
+          const suffix = targetPrefixSuggestion().available && qpcr.groupingMode === 'sample'
+            ? '。该文件疑似把分组写在 Target 前缀中，请先点击“按 Target 前缀重建分组”'
+            : '。请检查样本分组、内参选择或原始数据';
+          return toastMessage(`以下组无法匹配内参：${missingReferences.slice(0, 4).join('；')}${missingReferences.length > 4 ? ` 等 ${missingReferences.length} 组` : ''}${suffix}`);
+        }
         calculateResults();
         if (!qpcr.results.length) return toastMessage('没有可计算的靶基因结果，请检查数据是否包含内参和靶基因。');
         qpcr.step = 4; renderQpcr();
@@ -980,7 +1914,13 @@ const APP_VERSION = document.documentElement.dataset.appVersion || '2.12.0';
     }
     if (qpcr.step === 4) {
       $$('[data-result-view]').forEach(button => button.addEventListener('click', () => { qpcr.resultView = button.dataset.resultView; renderQpcr(); }));
-      $('#reconfigureQpcr').addEventListener('click', () => { qpcr.step = 3; renderQpcr(); });
+      $('#qpcrResultGene')?.addEventListener('change', event => { qpcr.resultGene = event.target.value; renderQpcr(); });
+      $('#qpcrChartError')?.addEventListener('change', event => { qpcr.chartError = event.target.value; renderQpcr(); });
+      $('#toggleQpcrChartTheme')?.addEventListener('click', () => {
+        qpcr.chartTheme = qpcr.chartTheme === 'mono' ? 'color' : 'mono';
+        renderQpcr();
+      });
+      $('#exportQpcrChartPng')?.addEventListener('click', exportQpcrChartPng);
       $('#exportQpcr').addEventListener('click', exportQpcr);
       $('#saveQpcrToLibrary').addEventListener('click', saveQpcrResultsToLibrary);
     }
@@ -1019,29 +1959,119 @@ const APP_VERSION = document.documentElement.dataset.appVersion || '2.12.0';
     const chartElement = $('#qpcrChart');
     if (!chartElement || !window.Chart) return;
     if (qpcr.chart) { qpcr.chart.destroy(); qpcr.chart = null; }
-    const genes = [...new Set(qpcr.results.map(result => result.gene))];
-    const samples = [...new Set(qpcr.results.map(result => result.sample))];
-    const summaries = new Map();
-    qpcr.results.forEach(result => {
-      const key = `${result.sample}|||${result.gene}`;
-      if (!summaries.has(key)) summaries.set(key, []);
-      if (Number.isFinite(result.foldChange)) summaries.get(key).push(result.foldChange);
-    });
+    qpcr.statistics = buildQpcrStatistics();
+    const statistics = qpcr.statistics.filter(item => qpcr.resultGene === 'all' || item.gene === qpcr.resultGene);
+    const genes = statistics.map(item => item.gene);
+    const samples = [...new Set(statistics.flatMap(item => item.groups.map(group => group.sample)))];
+    const summaries = new Map(statistics.flatMap(item => item.groups.map(group => [`${group.sample}|||${item.gene}`, { ...group, mode: item.mode, canInfer: item.canInfer }])));
     const colors = ['#60758b', '#f0a47b', '#6ea4c9', '#9a87bd', '#4aae83', '#d97189'];
+    const monochrome = ['#171717', '#555', '#8b8b8b', '#b8b8b8', '#dedede', '#fff'];
+    const fontFamily = '"Times New Roman", SimSun, "Songti SC", serif';
+    const descriptiveOnly = statistics.length > 0 && statistics.every(item => item.mode === 'descriptive');
+    const errorLabel = descriptiveOnly ? 'propagated technical error' : qpcr.chartError.toUpperCase();
     qpcr.chart = new Chart(chartElement, {
       type: 'bar',
-      data: { labels: genes, datasets: samples.map((sample, index) => ({ label: `${sample}${qpcr.controls.includes(sample) ? '（对照）' : ''}`, data: genes.map(gene => { const values = summaries.get(`${sample}|||${gene}`) || []; return values.length ? mean(values) : null; }), errorBars: genes.map(gene => { const values = summaries.get(`${sample}|||${gene}`) || []; return values.length > 1 ? sd(values) : null; }), backgroundColor: colors[index % colors.length], borderRadius: 4 })) },
-      plugins: [foldChangeErrorBars],
-      options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'top', labels: { boxWidth: 10, usePointStyle: true } }, tooltip: { callbacks: { label: context => { const error = context.dataset.errorBars?.[context.dataIndex]; return `${context.dataset.label}: ${fmt(context.raw, 4)} ± ${fmt(error, 4)} fold`; } } } }, scales: { y: { beginAtZero: true, title: { display: true, text: '相对表达量（fold change）' }, grid: { color: '#e9edf4' } }, x: { title: { display: true, text: '靶基因' }, grid: { display: false } } } },
+      data: {
+        labels: genes,
+        datasets: samples.map((sample, index) => ({
+          label: `${sample}${qpcr.controls.includes(sample) ? '（对照）' : ''}`,
+          data: genes.map(gene => summaries.get(`${sample}|||${gene}`)?.meanFold ?? null),
+          errorBars: genes.map(gene => {
+            const summary = summaries.get(`${sample}|||${gene}`);
+            if (!summary) return null;
+            if (summary.mode === 'descriptive') return summary.propagatedError;
+            return qpcr.chartError === 'sem' ? summary.semFold : summary.sdFold;
+          }),
+          rawPoints: genes.map(gene => {
+            const summary = summaries.get(`${sample}|||${gene}`);
+            return summary?.mode === 'descriptive' ? [] : summary?.foldValues || [];
+          }),
+          significanceLabels: genes.map(gene => {
+            const stat = statistics.find(item => item.gene === gene);
+            return stat?.canInfer ? stat.groups.find(group => group.sample === sample)?.letter || '—' : '—';
+          }),
+          backgroundColor: qpcr.chartTheme === 'mono' ? monochrome[index % monochrome.length] : colors[index % colors.length],
+          borderColor: '#111',
+          borderWidth: qpcr.chartTheme === 'mono' ? 1.2 : 0.8,
+          pointColor: '#111',
+          borderRadius: 0,
+          categoryPercentage: 0.62,
+          barPercentage: 0.72,
+          maxBarThickness: 92,
+        })),
+      },
+      plugins: [foldChangeErrorBars, qpcrJournalOverlay],
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        layout: { padding: { top: 18, right: 18, bottom: 8, left: 8 } },
+        plugins: {
+          qpcrJournalOverlay: { footnote: '' },
+          legend: {
+            position: 'top',
+            align: 'center',
+            labels: { boxWidth: 12, boxHeight: 12, usePointStyle: false, color: '#111', font: { family: fontFamily, size: 12 } },
+          },
+          tooltip: {
+            titleFont: { family: fontFamily },
+            bodyFont: { family: fontFamily },
+            callbacks: {
+              label: context => {
+                const error = context.dataset.errorBars?.[context.dataIndex];
+                return `${context.dataset.label}: ${fmt(context.raw, 4)} ± ${fmt(error, 4)} (${errorLabel})`;
+              },
+            },
+          },
+        },
+        scales: {
+          y: {
+            beginAtZero: true,
+            grace: '18%',
+            title: { display: true, text: `Relative expression (fold change, mean ± ${errorLabel})`, color: '#111', font: { family: fontFamily, size: 13, weight: 'normal' } },
+            ticks: { color: '#111', font: { family: fontFamily, size: 11 } },
+            grid: { display: false },
+            border: { color: '#111', width: 1.2 },
+          },
+          x: {
+            title: { display: true, text: 'Target gene', color: '#111', font: { family: fontFamily, size: 13, weight: 'normal' } },
+            ticks: { color: '#111', font: { family: fontFamily, size: 11 } },
+            grid: { display: false },
+            border: { color: '#111', width: 1.2 },
+          },
+        },
+      },
     });
   }
 
+  function exportQpcrChartPng() {
+    const chartElement = $('#qpcrChart');
+    if (!chartElement || !qpcr.chart) return toastMessage('请先打开期刊风格柱状图。');
+    const exportCanvas = document.createElement('canvas');
+    exportCanvas.width = chartElement.width;
+    exportCanvas.height = chartElement.height;
+    const exportContext = exportCanvas.getContext('2d');
+    exportContext.fillStyle = '#fff';
+    exportContext.fillRect(0, 0, exportCanvas.width, exportCanvas.height);
+    exportContext.drawImage(chartElement, 0, 0);
+    exportCanvas.toBlob(blob => {
+      if (!blob) return toastMessage('柱状图 PNG 编码失败。');
+      const gene = qpcr.resultGene === 'all' ? 'all-targets' : qpcr.resultGene.replace(/[^\w.-]+/g, '-');
+      downloadBlob(`qpcr-${gene}-${qpcr.chartTheme}.png`, blob);
+      toastMessage('qPCR 期刊风格柱状图已导出。');
+    }, 'image/png');
+  }
+
   function exportQpcr() {
-    const header = ['Sample/Group', 'Biological replicate', 'Gene', 'Technical replicate N', 'Mean Ct', 'Ct SD', 'Reference Ct', 'ΔCt', 'ΔCt SD', 'ΔΔCt', 'ΔΔCt SD', 'Livak Fold Change', 'Efficiency corrected Fold Change', 'Primer efficiency (%)', 'Propagated FC error', 'Control replicate N'];
-    const body = qpcr.results.map(result => [result.sample, result.replicate, result.gene, result.n, result.meanCt, result.ctSd, result.refCt, result.deltaCt, result.deltaCtSd, result.deltaDeltaCt, result.deltaDeltaCtSd, result.foldChange, result.efficiencyFold, number(qpcr.efficiencies[result.gene], 100), result.foldChangeSd, result.baselineN]);
-    const summaryHeader = ['Biological summary', 'Sample/Group', 'Gene', 'Biological N', 'Livak mean', 'Livak SD', 'Livak SEM', 'Efficiency corrected mean', 'Efficiency corrected SD'];
-    const summaryBody = biologicalSummaries().map(row => ['summary', row.sample, row.gene, row.n, row.meanFold, row.sdFold, row.semFold, row.meanEfficiencyFold, row.sdEfficiencyFold]);
-    const csv = [header, ...body, [], summaryHeader, ...summaryBody].map(row => row.map(csvCell).join(',')).join('\n');
+    qpcr.statistics = buildQpcrStatistics();
+    const cleanExceptionExport = qpcr.technicalAsIndependent && !hasBiologicalReplicateMapping();
+    const header = ['Sample/Group', 'Biological replicate', 'Gene', 'Technical replicate N', 'Mean Ct', 'Ct SD', 'Reference Ct', 'ΔCt', 'ΔCt SD', 'Relative to reference 2^-ΔCt', 'Relative expression propagated error', 'ΔΔCt', 'ΔΔCt SD', 'Livak Fold Change', 'Efficiency corrected Fold Change', 'Primer efficiency (%)', 'Propagated FC error', 'Control replicate N'];
+    const body = qpcr.results.map(result => [result.sample, result.replicate, result.gene, result.n, result.meanCt, result.ctSd, result.refCt, result.deltaCt, result.deltaCtSd, result.relativeExpression, result.relativeExpressionSd, result.deltaDeltaCt, result.deltaDeltaCtSd, result.foldChange, result.efficiencyFold, number(qpcr.efficiencies[result.gene], 100), result.foldChangeSd, result.baselineN]);
+    const summaryHeader = ['Statistical summary', 'Gene', 'Sample/Group', 'N', 'Mean fold change', 'SD or propagated technical error', 'SEM', 'Compact letter'];
+    const summaryBody = qpcr.statistics.flatMap(item => item.groups.map(group => ['summary', item.gene, group.sample, item.mode === 'descriptive' ? group.technicalN : group.n, group.meanFold, item.mode === 'descriptive' ? group.propagatedError : group.sdFold, item.mode === 'descriptive' ? '' : group.semFold, group.letter]));
+    const comparisonHeader = ['Pairwise comparison', 'Gene', 'Left group', 'Right group', 'Test scale', 'Welch t', 'df', 'Raw p', 'Holm adjusted p', 'Alpha', 'Significant'];
+    const comparisonBody = qpcr.statistics.flatMap(item => item.comparisons.map(comparison => ['comparison', item.gene, comparison.left, comparison.right, 'ΔCt', comparison.t, comparison.df, comparison.p, comparison.adjustedP, qpcr.significanceAlpha, comparison.adjustedP < qpcr.significanceAlpha ? 'yes' : 'no']));
+    const methodRows = cleanExceptionExport ? [] : qpcr.statistics.map(item => ['method', item.gene, item.method, item.warning]);
+    const csv = [header, ...body, [], summaryHeader, ...summaryBody, [], comparisonHeader, ...comparisonBody, [], ...methodRows].map(row => row.map(csvCell).join(',')).join('\n');
     downloadText('qpcr-ddct-results.csv', csv);
     toastMessage('qPCR 结果 CSV 已开始下载。');
   }
@@ -1059,10 +2089,13 @@ const APP_VERSION = document.documentElement.dataset.appVersion || '2.12.0';
         controls: [...qpcr.controls],
         efficiencies: { ...qpcr.efficiencies },
         qc: { ...qpcr.qc },
+        technicalAsIndependent: qpcr.technicalAsIndependent,
+        significanceAlpha: qpcr.significanceAlpha,
       },
       result: {
         rows: cloneData(qpcr.results),
         biologicalSummaries: cloneData(biologicalSummaries()),
+        statistics: cloneData(buildQpcrStatistics()),
       },
       sourceModule: 'qPCR ΔΔCt 分析',
     });
@@ -1071,6 +2104,56 @@ const APP_VERSION = document.documentElement.dataset.appVersion || '2.12.0';
   function resetQpcrWithDemo() {
     const demo = demoRows();
     ingestGrid(demo.headers, demo.grid);
+    qpcr.projectName = '简化 qPCR 教学示例';
+  }
+
+  function resetQpcrWithRenDemo() {
+    const demo = renQpcrDemoRows();
+    ingestGrid(demo.headers, demo.grid);
+    qpcr.projectName = '任银会 96 孔 qPCR 教学示例';
+    qpcr.references = ['UBQ5'];
+    qpcr.controls = ['kit'];
+    qpcr.exampleKind = 'ren-96';
+    qpcr.qcView = 'plate';
+    qpcr.step = 3;
+    defaultConfiguration();
+    renderQpcr();
+    toastMessage('已载入真实 96 孔教学示例：UBQ5 为内参，kit 为对照。');
+  }
+
+  function restartQpcrAnalysis() {
+    if (qpcr.rows.length && !window.confirm('重新导入会清空当前 qPCR 数据、标注和计算结果。确定继续吗？')) return;
+    if (qpcr.chart) qpcr.chart.destroy();
+    Object.assign(qpcr, {
+      step: 1,
+      projectName: '未命名 qPCR 项目',
+      headers: [],
+      rows: [],
+      mapping: { sample: '', gene: '', ct: '', replicate: '', well: '' },
+      groupingMode: 'sample',
+      prefixBaselineLabel: 'CONTROL',
+      qc: { min: 5, max: 40, sd: 2, deviation: 1 },
+      qcView: 'table',
+      flaggedOnly: false,
+      selectedRowId: '',
+      selectedRowIds: [],
+      selectionAnchorId: '',
+      efficiencies: {},
+      references: [],
+      controls: [],
+      results: [],
+      resultView: 'table',
+      resultGene: 'all',
+      chartTheme: 'color',
+      chartError: 'sd',
+      technicalAsIndependent: false,
+      significanceAlpha: 0.05,
+      statistics: [],
+      chart: null,
+      pendingWorkbook: null,
+      exampleKind: '',
+    });
+    renderQpcr();
   }
 
   function currentWbPreset() {
@@ -1321,11 +2404,103 @@ const APP_VERSION = document.documentElement.dataset.appVersion || '2.12.0';
     ctx.restore();
   }
 
+  function wbLineGuideWidth() {
+    return clamp(Math.round(number($('#wbLineGuideWidth')?.value, 28)), 6, 160);
+  }
+
+  function updateWbLineGuideUi() {
+    const addButton = $('#addWbLineGuide');
+    const clearButton = $('#clearWbLineGuides');
+    const detectButton = $('#detectWbFromLines');
+    const note = $('#wbLineGuideNote');
+    if (!addButton || !clearButton || !detectButton || !note) return;
+    addButton.classList.toggle('is-active', wb.lineGuideEditing);
+    addButton.textContent = wb.lineGuideEditing ? '在图上拖动绘制中心线…' : '绘制条带中心线';
+    clearButton.disabled = !wb.lineGuides.length && !wb.lineGuideDraft;
+    detectButton.disabled = !wb.lineGuides.length;
+    if (wb.lineGuideEditing) note.textContent = '按住鼠标，从最左条带中心拖到最右条带中心；松开后可继续添加下一排。';
+    else if (wb.lineGuides.length) note.textContent = `已绘制 ${wb.lineGuides.length} 条中心线；搜索带宽 ${wbLineGuideWidth()} px。拖动端点可校正位置。`;
+    else note.textContent = '单排条带画一条线；上下多排条带可分别画多条线后一次识别。';
+  }
+
+  function pointSegmentDistance(point, start, end) {
+    const dx = end.x - start.x;
+    const dy = end.y - start.y;
+    const denominator = dx * dx + dy * dy;
+    if (!denominator) return Math.hypot(point.x - start.x, point.y - start.y);
+    const ratio = clamp(((point.x - start.x) * dx + (point.y - start.y) * dy) / denominator, 0, 1);
+    return Math.hypot(point.x - (start.x + dx * ratio), point.y - (start.y + dy * ratio));
+  }
+
+  function wbLineGuideHit(point) {
+    const radius = wbImagePixelsForCss(12);
+    return [...wb.lineGuides].reverse().map(guide => {
+      const startDistance = Math.hypot(point.x - guide.start.x, point.y - guide.start.y);
+      const endDistance = Math.hypot(point.x - guide.end.x, point.y - guide.end.y);
+      const lineDistance = pointSegmentDistance(point, guide.start, guide.end);
+      if (startDistance <= radius) return { guide, mode: 'start' };
+      if (endDistance <= radius) return { guide, mode: 'end' };
+      if (lineDistance <= Math.max(radius * 0.75, guide.stripWidth / 2)) return { guide, mode: 'move' };
+      return null;
+    }).find(Boolean) || null;
+  }
+
+  function drawOneWbLineGuide(guide, index, draft = false) {
+    const dx = guide.end.x - guide.start.x;
+    const dy = guide.end.y - guide.start.y;
+    const length = Math.max(1, Math.hypot(dx, dy));
+    const normalX = -dy / length;
+    const normalY = dx / length;
+    const halfWidth = Math.max(3, number(guide.stripWidth, wbLineGuideWidth()) / 2);
+    const lineWidth = Math.max(1, wbImagePixelsForCss(1.6));
+    const handleSize = Math.max(5, wbImagePixelsForCss(7));
+    ctx.save();
+    ctx.strokeStyle = draft ? '#fbd56a' : '#57e4d8';
+    ctx.fillStyle = draft ? 'rgba(251, 213, 106, .08)' : 'rgba(87, 228, 216, .07)';
+    ctx.lineWidth = lineWidth;
+    ctx.beginPath();
+    ctx.moveTo(guide.start.x + normalX * halfWidth, guide.start.y + normalY * halfWidth);
+    ctx.lineTo(guide.end.x + normalX * halfWidth, guide.end.y + normalY * halfWidth);
+    ctx.lineTo(guide.end.x - normalX * halfWidth, guide.end.y - normalY * halfWidth);
+    ctx.lineTo(guide.start.x - normalX * halfWidth, guide.start.y - normalY * halfWidth);
+    ctx.closePath();
+    ctx.fill();
+    ctx.setLineDash([wbImagePixelsForCss(6), wbImagePixelsForCss(4)]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.lineWidth = lineWidth * 1.45;
+    ctx.beginPath();
+    ctx.moveTo(guide.start.x, guide.start.y);
+    ctx.lineTo(guide.end.x, guide.end.y);
+    ctx.stroke();
+    if (wb.lineGuideEditing || draft) {
+      ctx.fillStyle = '#ffffff';
+      ctx.strokeStyle = '#08736c';
+      [guide.start, guide.end].forEach(point => {
+        ctx.beginPath();
+        ctx.arc(point.x, point.y, handleSize, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+      });
+    }
+    const labelSize = Math.max(9, wbImagePixelsForCss(11));
+    ctx.font = `700 ${labelSize}px sans-serif`;
+    ctx.fillStyle = '#57e4d8';
+    ctx.fillText(`中心线 ${index + 1}`, guide.start.x, Math.max(labelSize, guide.start.y - halfWidth - labelSize * 0.45));
+    ctx.restore();
+  }
+
+  function drawWbLineGuides() {
+    wb.lineGuides.forEach((guide, index) => drawOneWbLineGuide(guide, index));
+    if (wb.lineGuideDraft) drawOneWbLineGuide(wb.lineGuideDraft, wb.lineGuides.length, true);
+  }
+
   function drawWb() {
     if (!wb.image) { canvas.width = 0; canvas.height = 0; applyWbViewport(); return; }
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.drawImage(wb.image, 0, 0, canvas.width, canvas.height);
     drawWbGuide();
+    drawWbLineGuides();
     wb.rois.forEach(roi => drawRoi(roi, roi.type, roi.name));
     const selected = wb.rois.find(roi => roi.id === wb.selectedId);
     if (selected) {
@@ -1340,6 +2515,7 @@ const APP_VERSION = document.documentElement.dataset.appVersion || '2.12.0';
     if (wb.tempROI) drawRoi(wb.tempROI, wb.tempROI.type, wb.tempROI.name, true);
     applyWbViewport();
     updateWbGuideUi();
+    updateWbLineGuideUi();
   }
 
   function wbFocusBoundsFromBands(bands) {
@@ -2230,7 +3406,33 @@ const APP_VERSION = document.documentElement.dataset.appVersion || '2.12.0';
     const expectedPitch = expectedCount ? profile.length / expectedCount : 0;
     const minimumWidth = Math.max(5, Math.round(profile.length * 0.012));
     const minimumDistance = Math.max(8, Math.round(expectedPitch ? expectedPitch * 0.52 : profile.length * 0.045));
-    let candidates = contiguousSignalRuns(profile, threshold, minimumWidth, Math.max(1, Math.round(profile.length * 0.003)));
+    const integrated = core.detectLineBands(profile, {
+      sensitivity,
+      minimumWidth,
+      mergeGap: Math.max(2, Math.round(expectedPitch ? expectedPitch * 0.11 : profile.length * 0.012)),
+      padding: 0,
+      baselineRadius: Math.max(11, Math.round(expectedPitch ? expectedPitch * 1.35 : profile.length * 0.18)),
+      // Only an explicit lane count may request a split, and even then the
+      // valley has to return close to membrane background. Automatic mode
+      // never splits a connected broad band.
+      allowCompositeSplitting: Boolean(expectedCount),
+      splitValleyRatio: 0.12,
+    });
+    // Treat the horizontal lane trace like ImageJ's integrated gel profile.
+    // This keeps faint lanes in 50.tif and 20-2.tif because they only need to
+    // rise above their local membrane background, not an image-wide threshold.
+    // It also keeps a broad band with two dark cores as one connected area.
+    let candidates = integrated.segments.map(segment => ({
+      start: segment.signalStart,
+      end: segment.signalEnd,
+      center: segment.center,
+      peak: segment.peak,
+      score: segment.area * (0.55 + segment.confidence),
+      integrated: true,
+    }));
+    if (candidates.length < 2) {
+      candidates = contiguousSignalRuns(profile, threshold, minimumWidth, Math.max(1, Math.round(profile.length * 0.003)));
+    }
 
     // A weak, diffuse band can contain a small dip and be returned as two
     // adjacent signal runs.  They are one physical lane, so merge them before
@@ -2238,7 +3440,14 @@ const APP_VERSION = document.documentElement.dataset.appVersion || '2.12.0';
     const mergeDistance = Math.max(minimumDistance, Math.round(expectedPitch ? expectedPitch * 0.5 : profile.length * 0.07));
     candidates = candidates.sort((a, b) => a.center - b.center).reduce((merged, candidate) => {
       const previous = merged[merged.length - 1];
-      if (!previous || candidate.center - previous.center >= mergeDistance) {
+      const signalGap = previous ? candidate.start - previous.end - 1 : Infinity;
+      // Never merge two independently closed peak areas merely because their
+      // centres are closer than the median lane pitch.  In 50.tif the real
+      // weak lanes sit immediately beside strong lanes and have much narrower
+      // peak areas.  Only touching/overlapping fragments can be parts of the
+      // same physical band; a baseline gap, however short, is lane evidence.
+      const fragmentsTouch = signalGap <= Math.max(1, Math.round(minimumWidth * 0.18));
+      if (!previous || candidate.center - previous.center >= mergeDistance || !fragmentsTouch) {
         merged.push({ ...candidate });
         return merged;
       }
@@ -2314,41 +3523,72 @@ const APP_VERSION = document.documentElement.dataset.appVersion || '2.12.0';
     // supplies an expected lane count.  Without that constraint, small
     // fluctuations inside a broad band can be mistaken for extra lanes.
     if (expectedCount) {
-      // Do not append arbitrary low-threshold maxima here. A broad physical
-      // lane often has two local maxima, and the second one would be promoted
-      // into a fake lane before the real weak gap is examined. Instead, use
-      // the geometry only to locate a conspicuously empty internal interval,
-      // then select the true local-contrast maximum inside that interval.
+      const gapBaselineRadius = Math.max(9, Math.round(expectedPitch * 0.72));
+      const gapBaseline = profile.map((_, index) => percentile(
+        profile.slice(Math.max(0, index - gapBaselineRadius), Math.min(profile.length, index + gapBaselineRadius + 1)),
+        0.18,
+      ));
+      const gapContrast = movingAverage(profile.map((value, index) => value - gapBaseline[index]), Math.max(1, Math.round(profile.length * 0.002)));
+      const quietContrast = gapContrast.slice().sort((a, b) => a - b).slice(0, Math.max(5, Math.floor(gapContrast.length * 0.62)));
+      const quietCenter = percentile(quietContrast, 0.5);
+      const contrastNoise = Math.max(0.12, percentile(quietContrast.map(value => Math.abs(value - quietCenter)), 0.5) * 1.4826);
+      // Inspect every actual gap, not just the widest one.  An irregular
+      // membrane can have a legitimate large empty interval at one end while
+      // two weak lanes sit in smaller internal gaps (50.tif).  Stopping after
+      // the empty widest gap made those weak lanes impossible to recover.
       while (candidates.length < expectedCount && candidates.length >= 2) {
         const ordered = [...candidates].sort((a, b) => a.center - b.center);
-        const gaps = ordered.slice(1).map((candidate, index) => ({ left: ordered[index], right: candidate, size: candidate.center - ordered[index].center }));
-        const medianGap = percentile(gaps.map(gap => gap.size), 0.5);
-        const gap = gaps.sort((a, b) => b.size - a.size)[0];
-        if (!gap || gap.size < Math.max(expectedPitch * 1.35, medianGap * 1.5)) break;
-        // A single missing lane inside a roughly double-pitch gap should lie
-        // near that gap's middle. Search only the central window, then choose
-        // the real local-contrast maximum within it. This excludes both broad
-        // neighbours' tails without inserting an equally spaced placeholder.
-        const gapMidpoint = (gap.left.center + gap.right.center) / 2;
-        const centralHalfWidth = Math.max(5, Math.min(expectedPitch * 0.25, gap.size * 0.18));
-        const searchStart = Math.ceil(gapMidpoint - centralHalfWidth);
-        const searchEnd = Math.floor(gapMidpoint + centralHalfWidth);
-        if (searchEnd <= searchStart) break;
-        // Search the conspicuous empty interval by local contrast, not raw
-        // darkness. A very faint lane can be only a few gray levels darker
-        // than an uneven membrane and therefore remain below the image-wide
-        // percentile threshold, while still forming a real local area peak.
-        const gapBaseline = movingAverage(profile, Math.max(8, Math.round(expectedPitch * 0.34)));
-        const gapContrast = profile.map((value, index) => value - gapBaseline[index]);
-        let bestIndex = searchStart;
-        for (let index = searchStart + 1; index <= searchEnd; index += 1) if (gapContrast[index] > gapContrast[bestIndex]) bestIndex = index;
-        const localNoise = sd(gapContrast.slice(searchStart, searchEnd + 1));
-        if (gapContrast[bestIndex] <= Math.max(0.45, localNoise * 0.18)) break;
-        if (candidates.some(candidate => Math.abs(candidate.center - bestIndex) < minimumDistance)) break;
-        candidates.push({ center: bestIndex, start: bestIndex, end: bestIndex, peak: profile[bestIndex], score: Math.max(0.001, gapContrast[bestIndex]), weakGapFill: true });
+        const minimumSeparation = Math.max(minimumWidth + 1, expectedPitch * 0.18);
+        const possible = ordered.slice(1).flatMap((right, index) => {
+          const left = ordered[index];
+          const gapSize = right.center - left.center;
+          if (gapSize < expectedPitch * 0.72) return [];
+          const searchStart = clamp(Math.ceil(Math.max(left.end + 1, left.center + minimumSeparation)), 1, profile.length - 2);
+          const searchEnd = clamp(Math.floor(Math.min(right.start - 1, right.center - minimumSeparation)), searchStart, profile.length - 2);
+          if (searchEnd - searchStart < Math.max(2, minimumWidth * 0.45)) return [];
+          const local = [];
+          for (let position = searchStart; position <= searchEnd; position += 1) {
+            if (gapContrast[position] >= gapContrast[position - 1] && gapContrast[position] > gapContrast[position + 1]) local.push(position);
+          }
+          if (!local.length) {
+            let strongest = searchStart;
+            for (let position = searchStart + 1; position <= searchEnd; position += 1) if (gapContrast[position] > gapContrast[strongest]) strongest = position;
+            local.push(strongest);
+          }
+          return local.map(position => {
+            const localFloor = Math.max(contrastNoise * 0.6, gapContrast[position] * 0.2);
+            let start = position;
+            let end = position;
+            while (start > searchStart && gapContrast[start - 1] >= localFloor) start -= 1;
+            while (end < searchEnd && gapContrast[end + 1] >= localFloor) end += 1;
+            const width = end - start + 1;
+            const edgePenalty = Math.min(position - searchStart + 1, searchEnd - position + 1) / Math.max(1, minimumWidth);
+            return {
+              center: position,
+              start,
+              end,
+              peak: profile[position],
+              score: Math.max(0, gapContrast[position]) * Math.min(1, width / Math.max(2, minimumWidth * 0.45)) * Math.min(1, edgePenalty),
+              weakGapFill: true,
+            };
+          });
+        }).filter(candidate => candidate.score >= Math.max(0.32, contrastNoise * 0.9)
+          && !candidates.some(existing => Math.abs(existing.center - candidate.center) < minimumSeparation));
+        const addition = possible.sort((left, right) => right.score - left.score)[0];
+        if (!addition) break;
+        candidates.push(addition);
       }
     }
 
+    if (/[?&]wbreg(?:=|&|$)/.test(location.search)) {
+      globalThis.__wbLaneProfileDiagnostics = {
+        expectedCount,
+        bounds: { ...bounds },
+        profile: [...profile],
+        integrated: integrated.segments.map(segment => ({ ...segment })),
+        candidates: candidates.map(candidate => ({ ...candidate })),
+      };
+    }
     if (expectedCount && candidates.length > expectedCount) candidates = candidates.sort((a, b) => b.score - a.score).slice(0, expectedCount);
     if (!candidates.length) return [{ ...bounds }];
 
@@ -2887,7 +4127,110 @@ const APP_VERSION = document.documentElement.dataset.appVersion || '2.12.0';
     return ordered;
   }
 
-  function autoDetectWb() {
+  function wbLineProfile(map, guide) {
+    const start = { x: guide.start.x / map.scale, y: guide.start.y / map.scale };
+    const end = { x: guide.end.x / map.scale, y: guide.end.y / map.scale };
+    const dx = end.x - start.x;
+    const dy = end.y - start.y;
+    const length = Math.max(2, Math.round(Math.hypot(dx, dy)) + 1);
+    const directionLength = Math.max(1, Math.hypot(dx, dy));
+    const normalX = -dy / directionLength;
+    const normalY = dx / directionLength;
+    const halfWidth = Math.max(1, Math.round(number(guide.stripWidth, wbLineGuideWidth()) / map.scale / 2));
+    const values = Array.from({ length }, (_, index) => {
+      const ratio = index / Math.max(1, length - 1);
+      const centerX = start.x + dx * ratio;
+      const centerY = start.y + dy * ratio;
+      const samples = [];
+      for (let offset = -halfWidth; offset <= halfWidth; offset += 1) {
+        const x = clamp(Math.round(centerX + normalX * offset), 0, map.width - 1);
+        const y = clamp(Math.round(centerY + normalY * offset), 0, map.height - 1);
+        samples.push(map.signal[y * map.width + x]);
+      }
+      return strongestFractionMean(samples, 0.68);
+    });
+    return { values, start, end, dx, dy, length, halfWidth };
+  }
+
+  function findWbBandCandidatesFromLines(map, guides, expectedLaneCount) {
+    const sensitivity = clamp(number($('#autoSensitivity').value, 65), 1, 100);
+    const rows = guides.map((guide, bandIndex) => {
+      const profile = wbLineProfile(map, guide);
+      const detection = core.detectLineBands(profile.values, {
+        sensitivity,
+        expectedCount: expectedLaneCount,
+        minimumWidth: Math.max(2, Math.round(profile.length * 0.004)),
+        mergeGap: Math.max(2, Math.round(profile.length * 0.012)),
+      });
+      const centers = detection.segments.map(segment => segment.center);
+      const pitch = percentile(centers.slice(1).map((center, index) => center - centers[index]).filter(value => value > 0), 0.5)
+        || profile.length / Math.max(1, detection.segments.length);
+      const candidates = detection.segments.map((segment, laneIndex) => {
+        const startRatio = segment.start / Math.max(1, profile.length - 1);
+        const endRatio = segment.end / Math.max(1, profile.length - 1);
+        const centerRatio = segment.center / Math.max(1, profile.length - 1);
+        const startPoint = {
+          x: (profile.start.x + profile.dx * startRatio) * map.scale,
+          y: (profile.start.y + profile.dy * startRatio) * map.scale,
+        };
+        const endPoint = {
+          x: (profile.start.x + profile.dx * endRatio) * map.scale,
+          y: (profile.start.y + profile.dy * endRatio) * map.scale,
+        };
+        const centerPoint = {
+          x: (profile.start.x + profile.dx * centerRatio) * map.scale,
+          y: (profile.start.y + profile.dy * centerRatio) * map.scale,
+        };
+        const stripWidth = Math.max(6, number(guide.stripWidth, wbLineGuideWidth()));
+        const paddingX = Math.max(2, Math.round(stripWidth * 0.08));
+        const x = clamp(Math.round(Math.min(startPoint.x, endPoint.x) - paddingX), 0, canvas.width - 3);
+        const right = clamp(Math.round(Math.max(startPoint.x, endPoint.x) + paddingX), x + 3, canvas.width);
+        const y = clamp(Math.round(Math.min(startPoint.y, endPoint.y, centerPoint.y) - stripWidth / 2), 0, canvas.height - 3);
+        const bottom = clamp(Math.round(Math.max(startPoint.y, endPoint.y, centerPoint.y) + stripWidth / 2), y + 3, canvas.height);
+        return {
+          x,
+          y,
+          width: Math.max(3, right - x),
+          height: Math.max(3, bottom - y),
+          laneIndex,
+          bandIndex,
+          laneCenter: centerPoint.x,
+          lanePitch: Math.max(8, pitch * map.scale),
+          score: Math.max(0.02, segment.confidence),
+          lineGuided: true,
+          edgeConfidence: segment.confidence,
+        };
+      });
+      return { guide, bandIndex, profile, detection, candidates };
+    });
+    const candidates = rows.flatMap(row => row.candidates);
+    const maxLanes = Math.max(0, ...rows.map(row => row.candidates.length));
+    const xValues = guides.flatMap(guide => [guide.start.x / map.scale, guide.end.x / map.scale]);
+    const yValues = guides.flatMap(guide => {
+      const halfWidth = number(guide.stripWidth, wbLineGuideWidth()) / map.scale / 2;
+      return [guide.start.y / map.scale - halfWidth, guide.start.y / map.scale + halfWidth, guide.end.y / map.scale - halfWidth, guide.end.y / map.scale + halfWidth];
+    });
+    const bounds = {
+      x0: clamp(Math.floor(Math.min(...xValues)), 0, map.width - 2),
+      x1: clamp(Math.ceil(Math.max(...xValues)), 1, map.width - 1),
+      y0: clamp(Math.floor(Math.min(...yValues)), 0, map.height - 2),
+      y1: clamp(Math.ceil(Math.max(...yValues)), 1, map.height - 1),
+    };
+    return {
+      candidates,
+      bounds,
+      lanes: Array.from({ length: maxLanes }, (_, laneIndex) => ({ laneIndex })),
+      effectiveBandsPerLane: Math.max(1, rows.length),
+      rowGuideCount: rows.length,
+      rowGuided: true,
+      guideApplied: true,
+      lineGuided: true,
+      ignoredLeftPercent: 0,
+      geometryOutliersRemoved: 0,
+    };
+  }
+
+  function autoDetectWb(options = {}) {
     if (!wb.image) return toastMessage('请先载入 WB 图片，再运行自动识别。');
     pushHistory('WB 自动识别');
     const maxBands = clamp(Math.round(number($('#autoMaxBands').value, 24)), 1, 96);
@@ -2896,7 +4239,21 @@ const APP_VERSION = document.documentElement.dataset.appVersion || '2.12.0';
     const preset = currentWbPreset();
     const manualRois = wb.rois.filter(roi => !roi.auto);
     const signalMap = wbSignalMap(preset.mapMaxSide);
-    const detection = findWbBandCandidates(signalMap, expectedLaneCount, wb.guide, preset);
+    const useLineGuides = Boolean(wb.lineGuides.length && options.ignoreLines !== true);
+    const detection = useLineGuides
+      ? findWbBandCandidatesFromLines(signalMap, wb.lineGuides, expectedLaneCount)
+      : findWbBandCandidates(signalMap, expectedLaneCount, wb.guide, preset);
+    if (/[?&]wbreg(?:=|&|$)/.test(location.search)) {
+      globalThis.__wbRegressionDiagnostics = {
+        fileName: wb.fileName,
+        expectedLaneCount,
+        lanes: detection.lanes.map(lane => ({ ...lane })),
+        candidates: detection.candidates.map(candidate => ({ ...candidate })),
+        bounds: { ...detection.bounds },
+        rowGuideCount: detection.rowGuideCount || 0,
+        lineGuided: Boolean(detection.lineGuided),
+      };
+    }
     const detectedBandsPerLane = Math.max(1, detection.effectiveBandsPerLane || bandsPerLane || 1);
     const rawCandidates = detection.candidates.sort((a, b) => b.score - a.score);
     const candidatesByLane = new Map();
@@ -2952,7 +4309,9 @@ const APP_VERSION = document.documentElement.dataset.appVersion || '2.12.0';
     const laneSource = expectedLaneCount ? `按填写的 ${expectedLaneCount} 个泳道` : `自动估计的 ${detection.lanes.length} 个泳道`;
     const markerNote = detection.ignoredLeftPercent ? `，已忽略左侧 ${fmt(detection.ignoredLeftPercent, 0)}% Marker 区域` : '';
     const outlierNote = detection.geometryOutliersRemoved ? `，已排除 ${detection.geometryOutliersRemoved} 个偏离主条带行的边缘伪影` : '';
-    const guideNote = detection.guideApplied ? '，限定在手动引导区内搜索' : '';
+    const guideNote = detection.lineGuided
+      ? `，沿 ${wb.lineGuides.length} 条手动画线积分识别`
+      : (detection.guideApplied ? '，限定在手动引导区内搜索' : '');
     const preprocessingNote = detection.rowGuided
       ? `；识别副本已裁除无关区域并按条带行补偿 ${fmt(wb.viewAngle, 2)}° 倾斜（定量仍读取原始像素）`
       : '';
@@ -3661,6 +5020,11 @@ const APP_VERSION = document.documentElement.dataset.appVersion || '2.12.0';
       wb.guide = null;
       wb.guideEditing = false;
       wb.guideInteraction = null;
+      wb.lineGuides = [];
+      wb.lineGuideEditing = false;
+      wb.lineGuideDraft = null;
+      wb.lineGuideInteraction = null;
+      wb.nextLineGuideId = 1;
       resetWbNavigation();
       canvas.width = image.naturalWidth;
       canvas.height = image.naturalHeight;
@@ -3794,7 +5158,7 @@ const APP_VERSION = document.documentElement.dataset.appVersion || '2.12.0';
 
   function clearWb() {
     pushHistory('清空 WB 工作区');
-    wb.image = null; wb.fileName = ''; wb.imageCtx = null; wb.source = null; wb.rois = []; wb.referenceId = ''; wb.profileRoiId = ''; wb.selectedId = ''; wb.drawing = null; wb.dragging = null; wb.resizing = null; wb.tempROI = null; wb.viewBounds = null; wb.viewMode = 'full'; wb.viewAngle = 0; wb.guide = null; wb.guideEditing = false; wb.guideInteraction = null; resetWbNavigation();
+    wb.image = null; wb.fileName = ''; wb.imageCtx = null; wb.source = null; wb.rois = []; wb.referenceId = ''; wb.profileRoiId = ''; wb.selectedId = ''; wb.drawing = null; wb.dragging = null; wb.resizing = null; wb.tempROI = null; wb.viewBounds = null; wb.viewMode = 'full'; wb.viewAngle = 0; wb.guide = null; wb.guideEditing = false; wb.guideInteraction = null; wb.lineGuides = []; wb.lineGuideEditing = false; wb.lineGuideDraft = null; wb.lineGuideInteraction = null; wb.nextLineGuideId = 1; resetWbNavigation();
     canvas.width = 0; canvas.height = 0;
     $('#wbImageInput').value = '';
     $('#wbEmptyState').classList.remove('hide');
@@ -6193,15 +7557,30 @@ const APP_VERSION = document.documentElement.dataset.appVersion || '2.12.0';
       controls: captureProjectControls(),
       qpcr: {
         step: qpcr.step,
+        projectName: qpcr.projectName,
         headers: qpcr.headers,
         rows: qpcr.rows,
         mapping: qpcr.mapping,
+        groupingMode: qpcr.groupingMode,
+        prefixBaselineLabel: qpcr.prefixBaselineLabel,
         qc: qpcr.qc,
+        qcView: qpcr.qcView,
+        flaggedOnly: qpcr.flaggedOnly,
+        selectedRowId: qpcr.selectedRowId,
+        selectedRowIds: qpcr.selectedRowIds,
+        selectionAnchorId: qpcr.selectionAnchorId,
         efficiencies: qpcr.efficiencies,
         references: qpcr.references,
         controls: qpcr.controls,
         results: qpcr.results,
         resultView: qpcr.resultView,
+        resultGene: qpcr.resultGene,
+        chartTheme: qpcr.chartTheme,
+        chartError: qpcr.chartError,
+        technicalAsIndependent: qpcr.technicalAsIndependent,
+        significanceAlpha: qpcr.significanceAlpha,
+        statistics: qpcr.statistics,
+        exampleKind: qpcr.exampleKind,
       },
       wb: {
         fileName: wb.fileName,
@@ -6213,6 +7592,8 @@ const APP_VERSION = document.documentElement.dataset.appVersion || '2.12.0';
         nextId: wb.nextId,
         profileRoiId: wb.profileRoiId,
         guide: wb.guide,
+        lineGuides: wb.lineGuides,
+        nextLineGuideId: wb.nextLineGuideId,
       },
       pair: {
         baseline: pair.baseline,
@@ -6292,17 +7673,32 @@ const APP_VERSION = document.documentElement.dataset.appVersion || '2.12.0';
       const savedQpcr = project.qpcr || {};
       Object.assign(qpcr, {
         step: clamp(Math.round(number(savedQpcr.step, 1)), 1, 4),
+        projectName: String(savedQpcr.projectName || '未命名 qPCR 项目'),
         headers: Array.isArray(savedQpcr.headers) ? savedQpcr.headers : [],
         rows: Array.isArray(savedQpcr.rows) ? savedQpcr.rows : [],
-        mapping: { sample: '', gene: '', ct: '', replicate: '', ...(savedQpcr.mapping || {}) },
+        mapping: { sample: '', gene: '', ct: '', replicate: '', well: '', ...(savedQpcr.mapping || {}) },
+        groupingMode: savedQpcr.groupingMode === 'target-prefix' ? 'target-prefix' : 'sample',
+        prefixBaselineLabel: normalizeQpcrIdentifier(savedQpcr.prefixBaselineLabel) || 'CONTROL',
         qc: { min: 5, max: 40, sd: 2, deviation: 1, ...(savedQpcr.qc || {}) },
+        qcView: savedQpcr.qcView === 'plate' ? 'plate' : 'table',
+        flaggedOnly: Boolean(savedQpcr.flaggedOnly),
+        selectedRowId: String(savedQpcr.selectedRowId || ''),
+        selectedRowIds: Array.isArray(savedQpcr.selectedRowIds) ? savedQpcr.selectedRowIds.map(String) : [],
+        selectionAnchorId: String(savedQpcr.selectionAnchorId || ''),
         efficiencies: savedQpcr.efficiencies && typeof savedQpcr.efficiencies === 'object' ? savedQpcr.efficiencies : {},
         references: Array.isArray(savedQpcr.references) ? savedQpcr.references : [],
         controls: Array.isArray(savedQpcr.controls) ? savedQpcr.controls : [],
         results: Array.isArray(savedQpcr.results) ? savedQpcr.results : [],
         resultView: savedQpcr.resultView === 'chart' ? 'chart' : 'table',
+        resultGene: String(savedQpcr.resultGene || 'all'),
+        chartTheme: savedQpcr.chartTheme === 'mono' ? 'mono' : 'color',
+        chartError: savedQpcr.chartError === 'sem' ? 'sem' : 'sd',
+        technicalAsIndependent: Boolean(savedQpcr.technicalAsIndependent),
+        significanceAlpha: clamp(number(savedQpcr.significanceAlpha, 0.05), 0.0001, 0.25),
+        statistics: Array.isArray(savedQpcr.statistics) ? savedQpcr.statistics : [],
         chart: null,
         pendingWorkbook: null,
+        exampleKind: savedQpcr.exampleKind === 'ren-96' ? 'ren-96' : '',
       });
       applyProjectControls(project.controls || {});
 
@@ -6371,6 +7767,18 @@ const APP_VERSION = document.documentElement.dataset.appVersion || '2.12.0';
       wb.guide = savedWb.guide && Number.isFinite(savedWb.guide.x) ? { ...savedWb.guide } : null;
       wb.guideEditing = false;
       wb.guideInteraction = null;
+      wb.lineGuides = Array.isArray(savedWb.lineGuides) ? savedWb.lineGuides
+        .filter(guide => guide?.start && guide?.end)
+        .map((guide, index) => ({
+          id: guide.id || `line-${index + 1}`,
+          start: { x: number(guide.start.x, 0), y: number(guide.start.y, 0) },
+          end: { x: number(guide.end.x, 0), y: number(guide.end.y, 0) },
+          stripWidth: clamp(number(guide.stripWidth, 28), 6, 160),
+        })) : [];
+      wb.nextLineGuideId = Math.max(1, Math.round(number(savedWb.nextLineGuideId, wb.lineGuides.length + 1)));
+      wb.lineGuideEditing = false;
+      wb.lineGuideDraft = null;
+      wb.lineGuideInteraction = null;
       resetWbNavigation();
       wb.drawing = null;
       wb.tempROI = null;
@@ -6502,7 +7910,9 @@ const APP_VERSION = document.documentElement.dataset.appVersion || '2.12.0';
       if (mode === 'pair') renderPairResults();
       if (mode === 'figure') renderWbFigure();
     }));
+    $('#restartQpcrAnalysis').addEventListener('click', restartQpcrAnalysis);
     $('#loadDemoQpcr').addEventListener('click', resetQpcrWithDemo);
+    $('#loadRenQpcrDemo').addEventListener('click', resetQpcrWithRenDemo);
     sheetDialog.addEventListener('submit', event => {
       event.preventDefault();
       if (event.submitter?.id !== 'confirmSheet') { sheetDialog.close(); return; }
@@ -6558,6 +7968,9 @@ const APP_VERSION = document.documentElement.dataset.appVersion || '2.12.0';
     });
     $('#editWbGuide').addEventListener('click', () => {
       if (!wb.image) return toastMessage('请先载入 WB 图片。');
+      wb.lineGuideEditing = false;
+      wb.lineGuideDraft = null;
+      wb.lineGuideInteraction = null;
       wb.guideEditing = !wb.guideEditing;
       wb.guideInteraction = null;
       updateWbGuideUi();
@@ -6573,6 +7986,40 @@ const APP_VERSION = document.documentElement.dataset.appVersion || '2.12.0';
       updateWbGuideUi();
       drawWb();
       recordAudit('wb-guide-cleared');
+    });
+    $('#addWbLineGuide').addEventListener('click', () => {
+      if (!wb.image) return toastMessage('请先载入 WB 图片。');
+      wb.guideEditing = false;
+      wb.guideInteraction = null;
+      wb.lineGuideEditing = !wb.lineGuideEditing;
+      wb.lineGuideDraft = null;
+      wb.lineGuideInteraction = null;
+      updateWbGuideUi();
+      updateWbLineGuideUi();
+      drawWb();
+      if (wb.lineGuideEditing) toastMessage('请从最左条带中心拖到最右条带中心。上下多排可重复绘制多条线。');
+    });
+    $('#clearWbLineGuides').addEventListener('click', () => {
+      if (!wb.lineGuides.length && !wb.lineGuideDraft) return;
+      pushHistory('清除 WB 条带中心线');
+      wb.lineGuides = [];
+      wb.lineGuideDraft = null;
+      wb.lineGuideInteraction = null;
+      wb.lineGuideEditing = false;
+      updateWbLineGuideUi();
+      drawWb();
+      recordAudit('wb-line-guides-cleared');
+    });
+    $('#wbLineGuideWidth').addEventListener('change', event => {
+      const width = clamp(Math.round(number(event.target.value, 28)), 6, 160);
+      event.target.value = width;
+      wb.lineGuides.forEach(guide => { guide.stripWidth = width; });
+      updateWbLineGuideUi();
+      drawWb();
+    });
+    $('#detectWbFromLines').addEventListener('click', () => {
+      if (!wb.lineGuides.length) return toastMessage('请先绘制至少一条条带中心线。');
+      autoDetectWb({ lineGuided: true });
     });
     $('#autoDetectWb').addEventListener('click', autoDetectWb);
     $('#focusWbView').addEventListener('click', () => {
@@ -6651,6 +8098,35 @@ const APP_VERSION = document.documentElement.dataset.appVersion || '2.12.0';
         canvas.style.cursor = 'grabbing';
         return;
       }
+      if (wb.lineGuideEditing) {
+        canvas.setPointerCapture(event.pointerId);
+        const hit = wbLineGuideHit(point);
+        if (hit) {
+          pushHistory('调整 WB 条带中心线');
+          wb.lineGuideInteraction = {
+            mode: hit.mode,
+            guideId: hit.guide.id,
+            start: point,
+            original: {
+              start: { ...hit.guide.start },
+              end: { ...hit.guide.end },
+            },
+          };
+          canvas.style.cursor = hit.mode === 'move' ? 'move' : 'crosshair';
+        } else {
+          pushHistory('绘制 WB 条带中心线');
+          wb.lineGuideDraft = {
+            id: `line-${wb.nextLineGuideId}`,
+            start: point,
+            end: point,
+            stripWidth: wbLineGuideWidth(),
+          };
+          wb.lineGuideInteraction = { mode: 'draw', start: point };
+          canvas.style.cursor = 'crosshair';
+        }
+        drawWb();
+        return;
+      }
       if (wb.guideEditing) {
         canvas.setPointerCapture(event.pointerId);
         const handle = wb.guide ? wbResizeHandleAt(point, wb.guide) : null;
@@ -6714,6 +8190,31 @@ const APP_VERSION = document.documentElement.dataset.appVersion || '2.12.0';
         drawWb();
         return;
       }
+      if (wb.lineGuideEditing && wb.lineGuideInteraction) {
+        const interaction = wb.lineGuideInteraction;
+        if (interaction.mode === 'draw' && wb.lineGuideDraft) {
+          wb.lineGuideDraft.end = point;
+        } else {
+          const guide = wb.lineGuides.find(item => item.id === interaction.guideId);
+          if (!guide) return;
+          if (interaction.mode === 'start') guide.start = point;
+          else if (interaction.mode === 'end') guide.end = point;
+          else if (interaction.mode === 'move') {
+            const dx = point.x - interaction.start.x;
+            const dy = point.y - interaction.start.y;
+            guide.start = {
+              x: clamp(Math.round(interaction.original.start.x + dx), 0, canvas.width),
+              y: clamp(Math.round(interaction.original.start.y + dy), 0, canvas.height),
+            };
+            guide.end = {
+              x: clamp(Math.round(interaction.original.end.x + dx), 0, canvas.width),
+              y: clamp(Math.round(interaction.original.end.y + dy), 0, canvas.height),
+            };
+          }
+        }
+        drawWb();
+        return;
+      }
       if (wb.guideEditing && wb.guideInteraction) {
         const interaction = wb.guideInteraction;
         if (interaction.mode === 'draw') wb.guide = normalizedRect(interaction.start, point);
@@ -6751,6 +8252,11 @@ const APP_VERSION = document.documentElement.dataset.appVersion || '2.12.0';
         canvas.style.cursor = guideHandle?.cursor || (insideGuide ? 'move' : 'crosshair');
         return;
       }
+      if (wb.lineGuideEditing) {
+        const hit = wbLineGuideHit(point);
+        canvas.style.cursor = hit?.mode === 'move' ? 'move' : 'crosshair';
+        return;
+      }
       const selected = wb.rois.find(roi => roi.id === wb.selectedId);
       const resizeHandle = wbResizeHandleAt(point, selected);
       const hit = [...wb.rois].reverse().find(roi => point.x >= roi.x && point.x <= roi.x + roi.width && point.y >= roi.y && point.y <= roi.y + roi.height);
@@ -6770,6 +8276,22 @@ const APP_VERSION = document.documentElement.dataset.appVersion || '2.12.0';
         updateWbGuideUi();
         drawWb();
         recordAudit('wb-guide-updated', { mode: interaction.mode, guide: wb.guide ? { ...wb.guide } : null });
+        return;
+      }
+      if (wb.lineGuideInteraction) {
+        const interaction = wb.lineGuideInteraction;
+        wb.lineGuideInteraction = null;
+        if (interaction.mode === 'draw' && wb.lineGuideDraft) {
+          const length = Math.hypot(wb.lineGuideDraft.end.x - wb.lineGuideDraft.start.x, wb.lineGuideDraft.end.y - wb.lineGuideDraft.start.y);
+          if (length >= Math.max(12, wbImagePixelsForCss(24))) {
+            wb.lineGuides.push({ ...wb.lineGuideDraft, id: `line-${wb.nextLineGuideId++}` });
+          }
+          wb.lineGuideDraft = null;
+          wb.lineGuideEditing = false;
+        }
+        updateWbLineGuideUi();
+        drawWb();
+        recordAudit('wb-line-guide-updated', { mode: interaction.mode, count: wb.lineGuides.length });
         return;
       }
       if (wb.resizing) {
@@ -6794,9 +8316,9 @@ const APP_VERSION = document.documentElement.dataset.appVersion || '2.12.0';
     };
     canvas.addEventListener('pointerup', finishDrawing);
     canvas.addEventListener('pointerleave', () => {
-      if (!wb.drawing && !wb.dragging && !wb.resizing && !wb.guideInteraction && !wb.panning) canvas.style.cursor = wb.panKey ? 'grab' : 'crosshair';
+      if (!wb.drawing && !wb.dragging && !wb.resizing && !wb.guideInteraction && !wb.lineGuideInteraction && !wb.panning) canvas.style.cursor = wb.panKey ? 'grab' : 'crosshair';
     });
-    canvas.addEventListener('pointercancel', () => { wb.drawing = null; wb.dragging = null; wb.resizing = null; wb.guideInteraction = null; wb.panning = null; wb.tempROI = null; canvas.style.cursor = 'crosshair'; drawWb(); });
+    canvas.addEventListener('pointercancel', () => { wb.drawing = null; wb.dragging = null; wb.resizing = null; wb.guideInteraction = null; wb.lineGuideInteraction = null; wb.lineGuideDraft = null; wb.panning = null; wb.tempROI = null; canvas.style.cursor = 'crosshair'; drawWb(); });
     $('#wbDropzone').addEventListener('keydown', event => {
       if (!wb.selectedId) return;
       const step = event.shiftKey ? 10 : 1;
